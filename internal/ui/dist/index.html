@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Broxy</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">BP</div>
+          <div>
+            <h1>Broxy</h1>
+            <p>Local control plane</p>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-link active" data-view="dashboard">Dashboard</button>
+          <button class="nav-link" data-view="requests">Requests</button>
+          <button class="nav-link" data-view="usage">Usage</button>
+          <button class="nav-link" data-view="keys">API Keys</button>
+          <button class="nav-link" data-view="models">Models</button>
+          <button class="nav-link" data-view="settings">Settings</button>
+        </nav>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <span class="eyebrow">Standalone proxy</span>
+            <h2 id="view-title">Dashboard</h2>
+          </div>
+          <div class="topbar-actions">
+            <button id="refresh-btn" class="ghost-button">Refresh</button>
+            <button id="logout-btn" class="ghost-button hidden">Logout</button>
+          </div>
+        </header>
+
+        <section id="login-card" class="login-card hidden">
+          <div class="panel">
+            <span class="eyebrow">Admin login</span>
+            <h3>Authenticate to manage the proxy</h3>
+            <form id="login-form" class="stack">
+              <label>
+                Username
+                <input name="username" value="admin" autocomplete="username" />
+              </label>
+              <label>
+                Password
+                <input name="password" type="password" autocomplete="current-password" />
+              </label>
+              <button type="submit" class="primary-button">Sign in</button>
+            </form>
+            <p id="login-error" class="error-message"></p>
+          </div>
+        </section>
+
+        <section id="app-content" class="stack hidden">
+          <div id="flash" class="flash hidden"></div>
+
+          <div id="dashboard-view" class="view stack">
+            <section class="hero">
+              <div>
+                <span class="eyebrow">Overview</span>
+                <h3>Traffic, tokens, and spend without extra infrastructure</h3>
+              </div>
+              <p id="hero-meta" class="muted"></p>
+            </section>
+            <section id="metrics-grid" class="metrics-grid"></section>
+            <section class="panel">
+              <div class="section-head">
+                <h3>Recent usage</h3>
+                <span class="muted">Daily totals by model and client key</span>
+              </div>
+              <div id="usage-chart" class="usage-chart"></div>
+            </section>
+          </div>
+
+          <div id="requests-view" class="view stack hidden">
+            <section class="panel">
+              <div class="section-head">
+                <h3>Recent requests</h3>
+                <span class="muted">Metadata is always stored. Raw prompts/outputs depend on the client key policy.</span>
+              </div>
+              <div id="requests-table" class="table-shell"></div>
+            </section>
+          </div>
+
+          <div id="usage-view" class="view stack hidden">
+            <section class="panel">
+              <div class="section-head">
+                <h3>Usage breakdown</h3>
+                <span class="muted">Grouped by day, model, and key</span>
+              </div>
+              <div id="usage-table" class="table-shell"></div>
+            </section>
+          </div>
+
+          <div id="keys-view" class="view stack hidden">
+            <section class="panel">
+              <div class="section-head">
+                <h3>Client API keys</h3>
+                <span class="muted">Each key can opt into raw content logging independently.</span>
+              </div>
+              <form id="key-form" class="inline-form">
+                <input name="name" placeholder="web-backend" />
+                <label class="checkbox">
+                  <input name="content_logging" type="checkbox" />
+                  Store prompts and outputs
+                </label>
+                <button type="submit" class="primary-button">Create key</button>
+              </form>
+              <div id="key-secret" class="callout hidden"></div>
+              <div id="keys-table" class="table-shell"></div>
+            </section>
+          </div>
+
+          <div id="models-view" class="view stack hidden">
+            <section class="panel">
+              <div class="section-head">
+                <h3>Model routing</h3>
+                <span class="muted">Clients can use an alias or a raw Bedrock model ID.</span>
+              </div>
+              <form id="model-form" class="model-form">
+                <input name="alias" placeholder="claude-haiku-4-5" />
+                <input name="model_id" placeholder="us.anthropic.claude-haiku-4-5-20251001-v1:0" />
+                <input name="region" placeholder="us-east-1" />
+                <input name="temperature" placeholder="temperature" />
+                <input name="max_tokens" placeholder="max tokens" />
+                <button type="submit" class="primary-button">Save route</button>
+              </form>
+              <div id="models-table" class="table-shell"></div>
+            </section>
+          </div>
+
+          <div id="settings-view" class="view stack hidden">
+            <section class="panel">
+              <div class="section-head">
+                <h3>Runtime settings</h3>
+                <span class="muted">This install is local-first and single-tenant.</span>
+              </div>
+              <pre id="settings-json" class="code-panel"></pre>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

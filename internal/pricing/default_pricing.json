@@ -1,0 +1,23 @@
+[
+  {
+    "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "region": "us-east-1",
+    "input_per_m_tokens": 0,
+    "output_per_m_tokens": 0,
+    "version": "starter-2026-04-05"
+  },
+  {
+    "model_id": "us.amazon.nova-lite-v1:0",
+    "region": "us-east-1",
+    "input_per_m_tokens": 0,
+    "output_per_m_tokens": 0,
+    "version": "starter-2026-04-05"
+  },
+  {
+    "model_id": "us.amazon.nova-pro-v1:0",
+    "region": "us-east-1",
+    "input_per_m_tokens": 0,
+    "output_per_m_tokens": 0,
+    "version": "starter-2026-04-05"
+  }
+]
