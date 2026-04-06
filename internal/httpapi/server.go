@@ -73,6 +73,8 @@ func (s *Server) Router() http.Handler {
 			r.Get("/keys", s.handleKeys)
 			r.Post("/keys", s.handleCreateKey)
 			r.Post("/keys/{id}/revoke", s.handleRevokeKey)
+			r.Get("/keys/{id}/usage", s.handleKeyUsage)
+			r.Put("/keys/{id}/limit", s.handleUpdateKeyLimit)
 			r.Get("/models", s.handleAdminModels)
 			r.Post("/models", s.handleCreateModel)
 			r.Get("/settings", s.handleSettings)
@@ -85,12 +87,36 @@ func (s *Server) Router() http.Handler {
 	return r
 }
 
+func currentMonth() string {
+	return time.Now().UTC().Format("2006-01")
+}
+
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	apiKey := clientKeyFromContext(r.Context())
 	if apiKey == nil {
 		writeError(w, http.StatusUnauthorized, "missing client authentication")
 		return
 	}
+
+	// Check monthly usage limit
+	if apiKey.MonthlyLimitUSD != nil && *apiKey.MonthlyLimitUSD > 0 {
+		month := currentMonth()
+		usage, err := s.store.GetAPIKeyMonthlyUsage(r.Context(), apiKey.ID, month)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to check usage")
+			return
+		}
+		if usage != nil && usage.IsOverLimit {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error": map[string]any{
+					"message": fmt.Sprintf("monthly usage limit exceeded for this API key. Current: $%.2f, Limit: $%.2f", usage.EstimatedCostUSD, *apiKey.MonthlyLimitUSD),
+					"type":    "rate_limit_error",
+				},
+			})
+			return
+		}
+	}
+
 	startedAt := time.Now().UTC()
 	var req ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -322,8 +348,9 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name           string `json:"name"`
-		ContentLogging bool   `json:"content_logging"`
+		Name            string   `json:"name"`
+		ContentLogging  bool     `json:"content_logging"`
+		MonthlyLimitUSD *float64 `json:"monthly_limit_usd"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -334,7 +361,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	item, err := s.store.CreateAPIKey(r.Context(), body.Name, security.KeyPrefix(token), security.HashAPIKey(token), body.ContentLogging)
+	item, err := s.store.CreateAPIKey(r.Context(), body.Name, security.KeyPrefix(token), security.HashAPIKey(token), body.ContentLogging, body.MonthlyLimitUSD)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -347,6 +374,43 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.DisableAPIKey(r.Context(), chi.URLParam(r, "id")); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleKeyUsage(w http.ResponseWriter, r *http.Request) {
+	keyID := chi.URLParam(r, "id")
+	month := r.URL.Query().Get("month")
+	if month == "" {
+		month = currentMonth()
+	}
+
+	usage, err := s.store.GetAPIKeyMonthlyUsage(r.Context(), keyID, month)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if usage == nil {
+		usage = &domain.APIKeyUsageSummary{
+			APIKeyID: keyID,
+			Month:    month,
+		}
+	}
+	writeJSON(w, http.StatusOK, usage)
+}
+
+func (s *Server) handleUpdateKeyLimit(w http.ResponseWriter, r *http.Request) {
+	keyID := chi.URLParam(r, "id")
+	var body struct {
+		MonthlyLimitUSD *float64 `json:"monthly_limit_usd"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if err := s.store.UpdateAPIKeyLimit(r.Context(), keyID, body.MonthlyLimitUSD); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
