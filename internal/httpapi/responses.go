@@ -361,11 +361,12 @@ func parseResponseTools(raw json.RawMessage) ([]domain.ToolDefinition, []map[str
 		return nil, []map[string]any{}, nil
 	}
 	var items []struct {
-		Type        string          `json:"type"`
-		Name        string          `json:"name"`
-		Description string          `json:"description"`
-		Parameters  json.RawMessage `json:"parameters"`
-		Strict      *bool           `json:"strict"`
+		Type              string          `json:"type"`
+		Name              string          `json:"name"`
+		Description       string          `json:"description"`
+		Parameters        json.RawMessage `json:"parameters"`
+		Strict            *bool           `json:"strict"`
+		ExternalWebAccess *bool           `json:"external_web_access"`
 	}
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return nil, nil, fmt.Errorf("invalid tools: %w", err)
@@ -373,7 +374,18 @@ func parseResponseTools(raw json.RawMessage) ([]domain.ToolDefinition, []map[str
 	defs := make([]domain.ToolDefinition, 0, len(items))
 	echo := make([]map[string]any, 0, len(items))
 	for _, item := range items {
-		if item.Type != "function" {
+		switch item.Type {
+		case "function":
+		case "web_search":
+			tool := map[string]any{
+				"type": "web_search",
+			}
+			if item.ExternalWebAccess != nil {
+				tool["external_web_access"] = *item.ExternalWebAccess
+			}
+			echo = append(echo, tool)
+			continue
+		default:
 			return nil, nil, fmt.Errorf("unsupported tool type %q", item.Type)
 		}
 		defs = append(defs, domain.ToolDefinition{

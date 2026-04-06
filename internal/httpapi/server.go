@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/gorilla/securecookie"
+	"github.com/gorilla/websocket"
 
 	"github.com/personal/broxy/internal/config"
 	"github.com/personal/broxy/internal/db"
@@ -37,6 +38,12 @@ type Server struct {
 	version   string
 	respMu    sync.RWMutex
 	responses map[string]storedResponse
+}
+
+var responsesUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
 }
 
 func New(cfg *config.Config, store *db.Store, provider Provider, version string) *Server {
@@ -64,6 +71,7 @@ func (s *Server) Router() http.Handler {
 		r.Use(s.requireClientAPIKey)
 		r.Get("/models", s.handleListModels)
 		r.Post("/chat/completions", s.handleChatCompletions)
+		r.Get("/responses", s.handleResponsesWebSocket)
 		r.Post("/responses", s.handleResponses)
 		r.Get("/responses/{id}", s.handleGetResponse)
 	})
@@ -232,34 +240,93 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "missing client authentication")
 		return
 	}
-	startedAt := time.Now().UTC()
 	var req ResponseRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
 		return
 	}
-	if strings.TrimSpace(req.Model) == "" {
-		writeError(w, http.StatusBadRequest, "model is required")
+	response, status, err := s.processResponseRequest(r.Context(), apiKey, r.Method, r.URL.Path, req, time.Now().UTC())
+	if err != nil {
+		writeError(w, status, err.Error())
 		return
+	}
+	if req.Stream {
+		s.streamResponsesResponse(w, response)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleResponsesWebSocket(w http.ResponseWriter, r *http.Request) {
+	apiKey := clientKeyFromContext(r.Context())
+	if apiKey == nil {
+		writeError(w, http.StatusUnauthorized, "missing client authentication")
+		return
+	}
+	conn, err := responsesUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	for {
+		var envelope struct {
+			Type string `json:"type"`
+			ResponseRequest
+		}
+		if err := conn.ReadJSON(&envelope); err != nil {
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				return
+			}
+			return
+		}
+		switch envelope.Type {
+		case "", "response.create":
+			envelope.Stream = true
+			response, _, err := s.processResponseRequest(r.Context(), apiKey, http.MethodGet, r.URL.Path, envelope.ResponseRequest, time.Now().UTC())
+			if err != nil {
+				_ = conn.WriteJSON(map[string]any{
+					"type": "error",
+					"error": map[string]any{
+						"message": err.Error(),
+						"type":    "proxy_error",
+					},
+				})
+				continue
+			}
+			if err := s.streamResponsesWebSocket(conn, response); err != nil {
+				return
+			}
+		default:
+			_ = conn.WriteJSON(map[string]any{
+				"type": "error",
+				"error": map[string]any{
+					"message": fmt.Sprintf("unsupported websocket message type %q", envelope.Type),
+					"type":    "proxy_error",
+				},
+			})
+		}
+	}
+}
+
+func (s *Server) processResponseRequest(ctx context.Context, apiKey *domain.APIKey, method string, path string, req ResponseRequest, startedAt time.Time) (map[string]any, int, error) {
+	if strings.TrimSpace(req.Model) == "" {
+		return nil, http.StatusBadRequest, errors.New("model is required")
 	}
 	var previous *storedResponse
 	if req.PreviousResponseID != "" {
 		item, ok := s.lookupResponse(req.PreviousResponseID)
 		if !ok {
-			writeError(w, http.StatusBadRequest, "previous_response_id not found")
-			return
+			return nil, http.StatusBadRequest, errors.New("previous_response_id not found")
 		}
 		previous = &item
 	}
 	normalized, err := normalizeResponseRequest(req, previous)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, http.StatusBadRequest, err
 	}
-	route, bedrockModelID, region, temp, maxTokens, err := s.resolveModel(r.Context(), req.Model, req.Temperature, req.MaxOutputTokens)
+	route, bedrockModelID, region, temp, maxTokens, err := s.resolveModel(ctx, req.Model, req.Temperature, req.MaxOutputTokens)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, http.StatusBadRequest, err
 	}
 	converseReq := domain.ConverseRequest{
 		ModelID:     bedrockModelID,
@@ -275,15 +342,15 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		converseReq.Tools = nil
 		converseReq.ToolChoice = nil
 	}
-	upstreamResp, err := s.provider.Converse(r.Context(), converseReq)
+	upstreamResp, err := s.provider.Converse(ctx, converseReq)
 	finishedAt := time.Now().UTC()
 	if err != nil {
-		s.logRequest(r.Context(), domain.RequestRecord{
+		s.logRequest(ctx, domain.RequestRecord{
 			StartedAt:      startedAt,
 			FinishedAt:     finishedAt,
 			APIKeyID:       apiKey.ID,
-			Method:         r.Method,
-			Path:           r.URL.Path,
+			Method:         method,
+			Path:           path,
 			ModelName:      req.Model,
 			BedrockModelID: bedrockModelID,
 			Region:         region,
@@ -294,17 +361,16 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 			RequestJSON:    s.maybeLoggedJSON(apiKey.ContentLogging, req),
 			Stream:         req.Stream,
 		})
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
+		return nil, http.StatusBadGateway, err
 	}
-	costEntry, _ := s.store.GetPricingEntry(r.Context(), upstreamResp.ModelID, region)
+	costEntry, _ := s.store.GetPricingEntry(ctx, upstreamResp.ModelID, region)
 	cost := pricing.EstimateCost(costEntry, upstreamResp.Usage)
 	record := domain.RequestRecord{
 		StartedAt:         startedAt,
 		FinishedAt:        finishedAt,
 		APIKeyID:          apiKey.ID,
-		Method:            r.Method,
-		Path:              r.URL.Path,
+		Method:            method,
+		Path:              path,
 		ModelName:         coalesceRouteName(route, req.Model),
 		BedrockModelID:    upstreamResp.ModelID,
 		Region:            region,
@@ -320,7 +386,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		UpstreamRequestID: upstreamResp.RequestID,
 		Stream:            req.Stream,
 	}
-	defer s.logRequest(r.Context(), record)
+	defer s.logRequest(ctx, record)
 
 	responseID := "resp_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	response := buildResponseEnvelope(responseID, req, normalized, upstreamResp)
@@ -340,11 +406,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		System:   cloneStrings(normalized.System),
 		Messages: append(cloneMessages(normalized.Messages), message),
 	})
-	if req.Stream {
-		s.streamResponsesResponse(w, response)
-		return
-	}
-	writeJSON(w, http.StatusOK, response)
+	return response, http.StatusOK, nil
 }
 
 func (s *Server) handleGetResponse(w http.ResponseWriter, r *http.Request) {
@@ -746,32 +808,52 @@ func (s *Server) streamResponsesResponse(w http.ResponseWriter, response map[str
 		writeError(w, http.StatusInternalServerError, "streaming not supported")
 		return
 	}
+	if err := s.streamResponsesEvents(response, func(payload map[string]any) error {
+		writeSSE(w, payload)
+		flusher.Flush()
+		return nil
+	}); err != nil {
+		return
+	}
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
 
+func (s *Server) streamResponsesWebSocket(conn *websocket.Conn, response map[string]any) error {
+	return s.streamResponsesEvents(response, func(payload map[string]any) error {
+		return conn.WriteJSON(payload)
+	})
+}
+
+func (s *Server) streamResponsesEvents(response map[string]any, send func(map[string]any) error) error {
 	output, _ := response["output"].([]map[string]any)
 	responseID, _ := response["id"].(string)
 	sequence := 0
-	writeEvent := func(payload map[string]any) {
+	writeEvent := func(payload map[string]any) error {
 		payload["sequence_number"] = sequence
 		payload["response_id"] = responseID
-		writeSSE(w, payload)
-		flusher.Flush()
 		sequence++
+		return send(payload)
 	}
 
-	writeEvent(map[string]any{
+	if err := writeEvent(map[string]any{
 		"type":     "response.created",
 		"response": cloneResponseForEvent(response, "in_progress", []map[string]any{}),
-	})
-	writeEvent(map[string]any{
+	}); err != nil {
+		return err
+	}
+	if err := writeEvent(map[string]any{
 		"type":     "response.in_progress",
 		"response": cloneResponseForEvent(response, "in_progress", []map[string]any{}),
-	})
+	}); err != nil {
+		return err
+	}
 	for outputIndex, item := range output {
 		itemType, _ := item["type"].(string)
 		itemID, _ := item["id"].(string)
 		switch itemType {
 		case "message":
-			writeEvent(map[string]any{
+			if err := writeEvent(map[string]any{
 				"type":         "response.output_item.added",
 				"output_index": outputIndex,
 				"item": map[string]any{
@@ -781,11 +863,13 @@ func (s *Server) streamResponsesResponse(w http.ResponseWriter, response map[str
 					"role":    "assistant",
 					"content": []map[string]any{},
 				},
-			})
+			}); err != nil {
+				return err
+			}
 			content, _ := item["content"].([]map[string]any)
 			for contentIndex, part := range content {
 				text, _ := part["text"].(string)
-				writeEvent(map[string]any{
+				if err := writeEvent(map[string]any{
 					"type":          "response.content_part.added",
 					"item_id":       itemID,
 					"output_index":  outputIndex,
@@ -795,38 +879,48 @@ func (s *Server) streamResponsesResponse(w http.ResponseWriter, response map[str
 						"text":        "",
 						"annotations": []any{},
 					},
-				})
+				}); err != nil {
+					return err
+				}
 				for _, chunk := range chunkText(text, 48) {
-					writeEvent(map[string]any{
+					if err := writeEvent(map[string]any{
 						"type":          "response.output_text.delta",
 						"item_id":       itemID,
 						"output_index":  outputIndex,
 						"content_index": contentIndex,
 						"delta":         chunk,
-					})
+					}); err != nil {
+						return err
+					}
 				}
-				writeEvent(map[string]any{
+				if err := writeEvent(map[string]any{
 					"type":          "response.output_text.done",
 					"item_id":       itemID,
 					"output_index":  outputIndex,
 					"content_index": contentIndex,
 					"text":          text,
-				})
-				writeEvent(map[string]any{
+				}); err != nil {
+					return err
+				}
+				if err := writeEvent(map[string]any{
 					"type":          "response.content_part.done",
 					"item_id":       itemID,
 					"output_index":  outputIndex,
 					"content_index": contentIndex,
 					"part":          part,
-				})
+				}); err != nil {
+					return err
+				}
 			}
-			writeEvent(map[string]any{
+			if err := writeEvent(map[string]any{
 				"type":         "response.output_item.done",
 				"output_index": outputIndex,
 				"item":         item,
-			})
+			}); err != nil {
+				return err
+			}
 		case "function_call":
-			writeEvent(map[string]any{
+			if err := writeEvent(map[string]any{
 				"type":         "response.output_item.added",
 				"output_index": outputIndex,
 				"item": map[string]any{
@@ -837,37 +931,43 @@ func (s *Server) streamResponsesResponse(w http.ResponseWriter, response map[str
 					"name":      item["name"],
 					"arguments": "",
 				},
-			})
+			}); err != nil {
+				return err
+			}
 			arguments, _ := item["arguments"].(string)
 			for _, chunk := range chunkText(arguments, 96) {
-				writeEvent(map[string]any{
+				if err := writeEvent(map[string]any{
 					"type":         "response.function_call_arguments.delta",
 					"item_id":      itemID,
 					"output_index": outputIndex,
 					"delta":        chunk,
-				})
+				}); err != nil {
+					return err
+				}
 			}
-			writeEvent(map[string]any{
+			if err := writeEvent(map[string]any{
 				"type":         "response.function_call_arguments.done",
 				"item_id":      itemID,
 				"output_index": outputIndex,
 				"arguments":    arguments,
 				"name":         item["name"],
 				"call_id":      item["call_id"],
-			})
-			writeEvent(map[string]any{
+			}); err != nil {
+				return err
+			}
+			if err := writeEvent(map[string]any{
 				"type":         "response.output_item.done",
 				"output_index": outputIndex,
 				"item":         item,
-			})
+			}); err != nil {
+				return err
+			}
 		}
 	}
-	writeEvent(map[string]any{
+	return writeEvent(map[string]any{
 		"type":     "response.completed",
 		"response": response,
 	})
-	fmt.Fprint(w, "data: [DONE]\n\n")
-	flusher.Flush()
 }
 
 func cloneResponseForEvent(response map[string]any, status string, output []map[string]any) map[string]any {

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/personal/broxy/internal/config"
 	"github.com/personal/broxy/internal/db"
 	"github.com/personal/broxy/internal/domain"
@@ -674,6 +675,145 @@ func TestResponsesProxyToolCallStreaming(t *testing.T) {
 	}
 	if !strings.Contains(bodyText, "\"type\":\"response.function_call_arguments.done\"") {
 		t.Fatalf("missing function_call_arguments done event: %s", bodyText)
+	}
+}
+
+func TestResponsesProxyAllowsWebSearchTool(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	provider := &recordingProvider{}
+	server := New(cfg, store, provider, "test")
+	body := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": "hello",
+		"tools": []map[string]any{
+			{
+				"type":                "web_search",
+				"external_web_access": false,
+			},
+			{
+				"type": "function",
+				"name": "exec_command",
+				"parameters": map[string]any{
+					"type": "object",
+				},
+			},
+		},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	requests := provider.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if len(requests[0].Tools) != 1 || requests[0].Tools[0].Name != "exec_command" {
+		t.Fatalf("unexpected upstream tools = %#v", requests[0].Tools)
+	}
+	var resp struct {
+		Tools []map[string]any `json:"tools"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(resp.Tools) != 2 || resp.Tools[0]["type"] != "web_search" || resp.Tools[1]["type"] != "function" {
+		t.Fatalf("unexpected echoed tools = %#v", resp.Tools)
+	}
+}
+
+func TestResponsesWebSocketProxy(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	server := New(cfg, store, fakeProvider{}, "test")
+	ts := httptest.NewServer(server.Router())
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/v1/responses"
+	header := http.Header{}
+	header.Set("Authorization", "Bearer bpx_test_secret")
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("Dial() error = %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteJSON(map[string]any{
+		"type":  "response.create",
+		"model": "claude-haiku-4-5",
+		"input": "hello",
+		"tools": []map[string]any{{
+			"type":                "web_search",
+			"external_web_access": false,
+		}},
+	}); err != nil {
+		t.Fatalf("WriteJSON() error = %v", err)
+	}
+
+	var sawDelta bool
+	var sawCompleted bool
+	for !sawCompleted {
+		var event map[string]any
+		if err := conn.ReadJSON(&event); err != nil {
+			t.Fatalf("ReadJSON() error = %v", err)
+		}
+		switch event["type"] {
+		case "response.output_text.delta":
+			sawDelta = true
+		case "response.completed":
+			sawCompleted = true
+			response, _ := event["response"].(map[string]any)
+			if response["output_text"] != "hello from bedrock" {
+				t.Fatalf("unexpected output_text = %#v", response["output_text"])
+			}
+		}
+	}
+	if !sawDelta {
+		t.Fatalf("missing response.output_text.delta event")
 	}
 }
 

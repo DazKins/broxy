@@ -6,6 +6,7 @@
 
 - OpenAI-style endpoints:
   - `POST /v1/chat/completions`
+  - `GET /v1/responses` for websocket Responses clients
   - `POST /v1/responses`
   - `GET /v1/responses/{response_id}`
   - `GET /v1/models`
@@ -153,15 +154,18 @@ The Responses API support is currently text-oriented:
 
 - string or message-style `input`
 - `instructions`
+- websocket `response.create` requests on `/v1/responses`
 - function tool definitions via `tools`
 - model-emitted function calls
 - text or JSON `function_call_output` follow-up inputs
 - `previous_response_id` chaining against in-memory server state
 - SSE streaming for text output
+- websocket streaming for text output and function-call argument deltas
+- passthrough tolerance for built-in `web_search` tool declarations from agent clients
 
 Currently unsupported:
 
-- non-function tool types
+- execution of built-in non-function tools such as `web_search`
 - multimodal tool outputs
 - persisted response storage beyond the running server process
 
