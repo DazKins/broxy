@@ -32,7 +32,7 @@ Broxy is packaged as a single binary plus a native user service:
 Default install:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/personal/broxy/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/DazKins/broxy/main/scripts/install.sh | sh
 ```
 
 The installer:
@@ -46,8 +46,8 @@ The installer:
 Override examples:
 
 ```bash
-BROXY_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/personal/broxy/main/scripts/install.sh | sh
-BROXY_CONFIG_PATH="$HOME/.broxy-dev/config.json" curl -fsSL https://raw.githubusercontent.com/personal/broxy/main/scripts/install.sh | sh
+BROXY_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/DazKins/broxy/main/scripts/install.sh | sh
+BROXY_CONFIG_PATH="$HOME/.broxy-dev/config.json" curl -fsSL https://raw.githubusercontent.com/DazKins/broxy/main/scripts/install.sh | sh
 ```
 
 ## Default paths
