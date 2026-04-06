@@ -397,8 +397,11 @@ func (s *Server) handleCreateModel(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"listen_addr":  s.cfg.ListenAddr,
+		"config_dir":   s.cfg.ConfigDir,
+		"state_dir":    s.cfg.StateDir,
 		"db_path":      s.cfg.DBPath,
 		"pricing_path": s.cfg.PricingPath,
+		"log_dir":      s.cfg.LogDir(),
 		"upstream": map[string]any{
 			"mode":    s.cfg.Upstream.Mode,
 			"region":  s.cfg.Upstream.Region,

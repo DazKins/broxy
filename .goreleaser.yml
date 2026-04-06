@@ -1,0 +1,37 @@
+version: 2
+
+project_name: broxy
+
+builds:
+  - id: broxy
+    main: ./cmd/broxy
+    binary: broxy
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/personal/broxy/internal/app.Version={{ .Version }}
+
+archives:
+  - id: broxy
+    ids:
+      - broxy
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  draft: false
+
+changelog:
+  use: git

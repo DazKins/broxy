@@ -2,11 +2,12 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -21,9 +22,21 @@ import (
 	"github.com/personal/broxy/internal/httpapi"
 	"github.com/personal/broxy/internal/pricing"
 	"github.com/personal/broxy/internal/security"
+	"github.com/personal/broxy/internal/service"
 )
 
-const Version = "0.1.0"
+var Version = "dev"
+
+type initResult struct {
+	ConfigPath    string `json:"config_path"`
+	ConfigDir     string `json:"config_dir"`
+	StateDir      string `json:"state_dir"`
+	DBPath        string `json:"db_path"`
+	PricingPath   string `json:"pricing_path"`
+	LogDir        string `json:"log_dir"`
+	AdminUsername string `json:"admin_username"`
+	AdminPassword string `json:"admin_password"`
+}
 
 func NewRootCommand() *cobra.Command {
 	var configPath string
@@ -35,6 +48,9 @@ func NewRootCommand() *cobra.Command {
 	cmd.AddCommand(
 		newInitCommand(&configPath),
 		newServeCommand(&configPath),
+		newServiceCommand(&configPath),
+		newConfigCommand(&configPath),
+		newVersionCommand(),
 		newAdminCommand(&configPath),
 		newAPIKeyCommand(&configPath),
 		newModelsCommand(&configPath),
@@ -45,27 +61,28 @@ func NewRootCommand() *cobra.Command {
 }
 
 func newInitCommand(configPath *string) *cobra.Command {
-	return &cobra.Command{
+	var nonInteractive bool
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Initialize config, database, pricing catalog, and admin credentials",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			_ = nonInteractive
+
 			path, err := cfgpkg.ConfigPath(*configPath)
 			if err != nil {
 				return err
 			}
 			if _, err := os.Stat(path); err == nil {
 				return fmt.Errorf("config already exists at %s", path)
+			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("stat config %s: %w", path, err)
 			}
-			cfg, err := cfgpkg.Default()
+
+			cfg, err := cfgpkg.DefaultForPath(path)
 			if err != nil {
 				return err
-			}
-			if *configPath != "" {
-				baseDir := filepath.Dir(path)
-				cfg.ConfigDir = baseDir
-				cfg.DataDir = filepath.Join(baseDir, "data")
-				cfg.DBPath = filepath.Join(cfg.DataDir, "broxy.db")
-				cfg.PricingPath = filepath.Join(baseDir, "pricing.json")
 			}
 			secret, err := security.RandomToken("sess_", 48)
 			if err != nil {
@@ -90,10 +107,37 @@ func newInitCommand(configPath *string) *cobra.Command {
 			if err := seedPricing(cmd.Context(), store, cfg.PricingPath); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Config: %s\nDB: %s\nPricing: %s\nAdmin username: admin\nAdmin password: %s\n", path, cfg.DBPath, cfg.PricingPath, password)
+
+			result := initResult{
+				ConfigPath:    path,
+				ConfigDir:     cfg.ConfigDir,
+				StateDir:      cfg.StateDir,
+				DBPath:        cfg.DBPath,
+				PricingPath:   cfg.PricingPath,
+				LogDir:        cfg.LogDir(),
+				AdminUsername: "admin",
+				AdminPassword: password,
+			}
+			if jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), result)
+			}
+			fmt.Fprintf(
+				cmd.OutOrStdout(),
+				"Config: %s\nState: %s\nDB: %s\nPricing: %s\nLogs: %s\nAdmin username: %s\nAdmin password: %s\n",
+				result.ConfigPath,
+				result.StateDir,
+				result.DBPath,
+				result.PricingPath,
+				result.LogDir,
+				result.AdminUsername,
+				result.AdminPassword,
+			)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "disable interactive prompts")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "print the result as JSON")
+	return cmd
 }
 
 func newServeCommand(configPath *string) *cobra.Command {
@@ -129,6 +173,238 @@ func newServeCommand(configPath *string) *cobra.Command {
 				}
 				return err
 			}
+		},
+	}
+}
+
+func newServiceCommand(configPath *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "service",
+		Short: "Manage the background broxy service",
+	}
+
+	var dryRun bool
+	installCmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install the native user service definition",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			def, cfg, err := serviceDefinition(*configPath, !dryRun)
+			if err != nil {
+				return err
+			}
+			rendered, err := service.Render(def)
+			if err != nil {
+				return err
+			}
+			if dryRun {
+				fmt.Fprintf(cmd.OutOrStdout(), "Service file: %s\n\n%s", def.ServiceFile, rendered)
+				return nil
+			}
+			if err := cfgpkg.EnsureLayout(cfg); err != nil {
+				return err
+			}
+			if err := service.Install(def); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Installed service definition at %s\n", def.ServiceFile)
+			return nil
+		},
+	}
+	installCmd.Flags().BoolVar(&dryRun, "dry-run", false, "render the service file without writing it")
+
+	cmd.AddCommand(installCmd)
+	cmd.AddCommand(&cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove the native user service definition",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			def, _, err := serviceDefinition(*configPath, false)
+			if err != nil {
+				return err
+			}
+			if err := service.Uninstall(def); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Removed service definition %s\n", def.ServiceFile)
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "start",
+		Short: "Start the background service",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			def, _, err := serviceDefinition(*configPath, true)
+			if err != nil {
+				return err
+			}
+			if err := service.Start(def); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Started broxy service")
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "stop",
+		Short: "Stop the background service",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			def, _, err := serviceDefinition(*configPath, false)
+			if err != nil {
+				return err
+			}
+			if err := service.Stop(def); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Stopped broxy service")
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "restart",
+		Short: "Restart the background service",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			def, _, err := serviceDefinition(*configPath, true)
+			if err != nil {
+				return err
+			}
+			if err := service.Restart(def); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Restarted broxy service")
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "status",
+		Short: "Show background service status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			def, cfg, err := serviceDefinition(*configPath, false)
+			if err != nil {
+				return err
+			}
+			if _, err := os.Stat(def.ServiceFile); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					fmt.Fprintf(
+						cmd.OutOrStdout(),
+						"manager=%s\nservice=%s\nstate=not-installed\nconfig=%s\nlisten_addr=%s\nversion=%s\n",
+						def.Target,
+						def.Label,
+						def.ConfigPath,
+						cfg.ListenAddr,
+						Version,
+					)
+					return nil
+				}
+				return err
+			}
+			status, err := service.GetStatus(def)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			state := "stopped"
+			subState := ""
+			enabled := "installed"
+			pid := ""
+			manager := string(def.Target)
+			if status != nil {
+				manager = status.Manager
+				if status.State != "" {
+					state = status.State
+				}
+				subState = status.SubState
+				if status.Enabled != "" {
+					enabled = status.Enabled
+				}
+				pid = status.PID
+			}
+			fmt.Fprintf(
+				cmd.OutOrStdout(),
+				"manager=%s\nservice=%s\nstate=%s\nsubstate=%s\nenabled=%s\npid=%s\nconfig=%s\nlisten_addr=%s\nversion=%s\n",
+				manager,
+				def.Label,
+				state,
+				subState,
+				enabled,
+				pid,
+				def.ConfigPath,
+				cfg.ListenAddr,
+				Version,
+			)
+			return nil
+		},
+	})
+
+	var logLines int
+	var logStream string
+	logsCmd := &cobra.Command{
+		Use:   "logs",
+		Short: "Tail service log files",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			def, _, err := serviceDefinition(*configPath, false)
+			if err != nil {
+				return err
+			}
+			body, err := service.TailLogs(def, logStream, logLines)
+			if err != nil {
+				return err
+			}
+			fmt.Fprint(cmd.OutOrStdout(), body)
+			return nil
+		},
+	}
+	logsCmd.Flags().IntVar(&logLines, "lines", service.DefaultLogTail, "number of lines to show")
+	logsCmd.Flags().StringVar(&logStream, "stream", "both", "stdout, stderr, or both")
+	cmd.AddCommand(logsCmd)
+
+	return cmd
+}
+
+func newConfigCommand(configPath *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "Inspect config paths and defaults",
+	}
+	var jsonOutput bool
+	pathCmd := &cobra.Command{
+		Use:   "path",
+		Short: "Print effective config, state, and log paths",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := cfgpkg.ConfigPath(*configPath)
+			if err != nil {
+				return err
+			}
+			cfg, err := loadOrDefaultConfig(path)
+			if err != nil {
+				return err
+			}
+			payload := map[string]string{
+				"config_path":  path,
+				"config_dir":   cfg.ConfigDir,
+				"state_dir":    cfg.StateDir,
+				"db_path":      cfg.DBPath,
+				"pricing_path": cfg.PricingPath,
+				"log_dir":      cfg.LogDir(),
+			}
+			if jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), payload)
+			}
+			for _, key := range []string{"config_path", "config_dir", "state_dir", "db_path", "pricing_path", "log_dir"} {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s=%s\n", key, payload[key])
+			}
+			return nil
+		},
+	}
+	pathCmd.Flags().BoolVar(&jsonOutput, "json", false, "print the result as JSON")
+	cmd.AddCommand(pathCmd)
+	return cmd
+}
+
+func newVersionCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the current broxy version",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Fprintln(cmd.OutOrStdout(), Version)
+			return nil
 		},
 	}
 }
@@ -413,7 +689,10 @@ func bootstrap(ctx context.Context, configPath string) (*cfgpkg.Config, *db.Stor
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("load config %s: %w", path, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
+	if err := cfgpkg.EnsureLayout(cfg); err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if err := cfgpkg.MigrateLegacyState(path, cfg); err != nil {
 		return nil, nil, nil, nil, err
 	}
 	store, err := db.Open(cfg.DBPath)
@@ -469,4 +748,55 @@ func awsString(v *string) string {
 		return ""
 	}
 	return *v
+}
+
+func loadOrDefaultConfig(path string) (*cfgpkg.Config, error) {
+	if _, err := os.Stat(path); err == nil {
+		return cfgpkg.Load(path)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	return cfgpkg.DefaultForPath(path)
+}
+
+func serviceDefinition(configOverride string, requireConfig bool) (*service.Definition, *cfgpkg.Config, error) {
+	path, err := cfgpkg.ConfigPath(configOverride)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg, err := loadOrDefaultConfig(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if requireConfig {
+		if _, err := os.Stat(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, nil, fmt.Errorf("config not found at %s; run `broxy init` first", path)
+			}
+			return nil, nil, err
+		}
+	}
+	target, err := service.CurrentTarget()
+	if err != nil {
+		return nil, nil, err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, nil, fmt.Errorf("locate current executable: %w", err)
+	}
+	def, err := service.NewDefinition(target, cfg, path, executable, service.CapturedEnvironment())
+	if err != nil {
+		return nil, nil, err
+	}
+	return def, cfg, nil
+}
+
+func writeJSON(w interface{ Write([]byte) (int, error) }, value any) error {
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+	_, err = w.Write(encoded)
+	return err
 }
