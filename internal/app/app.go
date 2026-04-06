@@ -440,6 +440,7 @@ func newAPIKeyCommand(configPath *string) *cobra.Command {
 		Short: "Manage proxy API keys",
 	}
 	var contentLogging bool
+	var monthlyLimit float64
 	createCmd := &cobra.Command{
 		Use:   "create --name <name>",
 		Short: "Create a new client API key",
@@ -457,16 +458,24 @@ func newAPIKeyCommand(configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			item, err := store.CreateAPIKey(cmd.Context(), name, security.KeyPrefix(token), security.HashAPIKey(token), contentLogging)
+			var monthlyLimitPtr *float64
+			if monthlyLimit > 0 {
+				monthlyLimitPtr = &monthlyLimit
+			}
+			item, err := store.CreateAPIKey(cmd.Context(), name, security.KeyPrefix(token), security.HashAPIKey(token), contentLogging, monthlyLimitPtr)
 			if err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "ID: %s\nName: %s\nKey: %s\n", item.ID, item.Name, token)
+			if item.MonthlyLimitUSD != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Monthly limit: $%.2f\n", *item.MonthlyLimitUSD)
+			}
 			return nil
 		},
 	}
 	createCmd.Flags().String("name", "", "display name for the key")
 	createCmd.Flags().BoolVar(&contentLogging, "log-content", false, "store prompts and outputs for this key")
+	createCmd.Flags().Float64Var(&monthlyLimit, "monthly-limit", 0, "monthly USD spending limit (0 = unlimited)")
 	cmd.AddCommand(createCmd)
 	cmd.AddCommand(&cobra.Command{
 		Use:   "list",
@@ -482,11 +491,43 @@ func newAPIKeyCommand(configPath *string) *cobra.Command {
 				return err
 			}
 			for _, item := range items {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\tcontent_logging=%t\tenabled=%t\tlast_used=%s\n", item.ID, item.Name, item.ContentLogging, item.Enabled, item.LastUsedAt.Format(time.RFC3339))
+				limitStr := "unlimited"
+				if item.MonthlyLimitUSD != nil {
+					limitStr = fmt.Sprintf("$%.2f", *item.MonthlyLimitUSD)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\tlimit=%s\tcontent_logging=%t\tenabled=%t\tlast_used=%s\n", item.ID, item.Name, limitStr, item.ContentLogging, item.Enabled, item.LastUsedAt.Format(time.RFC3339))
 			}
 			return nil
 		},
 	})
+	setLimitCmd := &cobra.Command{
+		Use:   "set-limit <id> --monthly-limit <amount>",
+		Short: "Set or update the monthly USD spending limit for an API key",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			limit, _ := cmd.Flags().GetFloat64("monthly-limit")
+			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			var limitPtr *float64
+			if limit > 0 {
+				limitPtr = &limit
+			}
+			if err := store.UpdateAPIKeyLimit(cmd.Context(), args[0], limitPtr); err != nil {
+				return err
+			}
+			if limitPtr == nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Updated API key %s to unlimited\n", args[0])
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Updated API key %s with monthly limit: $%.2f\n", args[0], *limitPtr)
+			}
+			return nil
+		},
+	}
+	setLimitCmd.Flags().Float64("monthly-limit", 0, "monthly USD spending limit (0 = unlimited)")
+	cmd.AddCommand(setLimitCmd)
 	cmd.AddCommand(&cobra.Command{
 		Use:   "revoke <id>",
 		Short: "Disable an API key",
@@ -500,6 +541,40 @@ func newAPIKeyCommand(configPath *string) *cobra.Command {
 			return store.DisableAPIKey(cmd.Context(), args[0])
 		},
 	})
+	usageCmd := &cobra.Command{
+		Use:   "usage [--month YYYY-MM]",
+		Short: "Show per-key usage for a given month (defaults to current month)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			month, _ := cmd.Flags().GetString("month")
+			if month == "" {
+				month = time.Now().UTC().Format("2006-01")
+			}
+			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			usages, err := store.ListAPIKeyUsage(cmd.Context(), month)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Month %s usage:\n", month)
+			for _, usage := range usages {
+				limitStr := "unlimited"
+				overStr := ""
+				if usage.MonthlyLimitUSD != nil {
+					limitStr = fmt.Sprintf("$%.2f", *usage.MonthlyLimitUSD)
+					if usage.IsOverLimit {
+						overStr = " [OVER LIMIT]"
+					}
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\trequests=%d\ttokens=%d\tcost=$%.6f\tlimit=%s%s\n", usage.APIKeyID, usage.APIKeyName, usage.Requests, usage.TotalTokens, usage.EstimatedCostUSD, limitStr, overStr)
+			}
+			return nil
+		},
+	}
+	usageCmd.Flags().String("month", "", "month in YYYY-MM format (defaults to current month)")
+	cmd.AddCommand(usageCmd)
 	return cmd
 }
 

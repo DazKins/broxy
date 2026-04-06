@@ -14,13 +14,14 @@ type AdminUser struct {
 }
 
 type APIKey struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name"`
-	KeyPrefix      string    `json:"key_prefix"`
-	ContentLogging bool      `json:"content_logging"`
-	Enabled        bool      `json:"enabled"`
-	CreatedAt      time.Time `json:"created_at"`
-	LastUsedAt     time.Time `json:"last_used_at,omitempty"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	KeyPrefix       string     `json:"key_prefix"`
+	ContentLogging  bool       `json:"content_logging"`
+	Enabled         bool       `json:"enabled"`
+	MonthlyLimitUSD *float64   `json:"monthly_limit_usd,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	LastUsedAt      time.Time  `json:"last_used_at,omitempty"`
 }
 
 type ModelRoute struct {
@@ -124,4 +125,17 @@ type ConverseResponse struct {
 	LatencyMS   int64      `json:"latency_ms"`
 	RequestID   string     `json:"request_id"`
 	RawResponse string     `json:"raw_response,omitempty"`
+}
+
+type APIKeyUsageSummary struct {
+	APIKeyID          string  `json:"api_key_id"`
+	APIKeyName        string  `json:"api_key_name"`
+	Month             string  `json:"month"`
+	Requests          int     `json:"requests"`
+	InputTokens       int     `json:"input_tokens"`
+	OutputTokens      int     `json:"output_tokens"`
+	TotalTokens       int     `json:"total_tokens"`
+	EstimatedCostUSD  float64 `json:"estimated_cost_usd"`
+	MonthlyLimitUSD   *float64 `json:"monthly_limit_usd,omitempty"`
+	IsOverLimit       bool    `json:"is_over_limit"`
 }

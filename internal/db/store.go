@@ -53,6 +53,7 @@ func (s *Store) migrate() error {
 			key_hash text not null unique,
 			content_logging integer not null default 0,
 			enabled integer not null default 1,
+			monthly_limit_usd real,
 			created_at text not null,
 			last_used_at text
 		);`,
@@ -105,6 +106,39 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("run migration: %w", err)
 		}
 	}
+	if err := s.ensureColumns(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureColumns() error {
+	rows, err := s.db.Query("pragma table_info(api_keys)")
+	if err != nil {
+		return fmt.Errorf("pragma table_info: %w", err)
+	}
+	defer rows.Close()
+	hasMonthlyLimit := false
+	for rows.Next() {
+		var cid int
+		var name string
+		var colType string
+		var notnull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notnull, &dfltValue, &pk); err != nil {
+			return err
+		}
+		if name == "monthly_limit_usd" {
+			hasMonthlyLimit = true
+			break
+		}
+	}
+	if !hasMonthlyLimit {
+		if _, err := s.db.Exec(`alter table api_keys add column monthly_limit_usd real`); err != nil {
+			return fmt.Errorf("alter table add monthly_limit_usd: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -134,19 +168,20 @@ func (s *Store) GetAdminUser(ctx context.Context, username string) (*domain.Admi
 	return &user, nil
 }
 
-func (s *Store) CreateAPIKey(ctx context.Context, name, keyPrefix, keyHash string, contentLogging bool) (*domain.APIKey, error) {
+func (s *Store) CreateAPIKey(ctx context.Context, name, keyPrefix, keyHash string, contentLogging bool, monthlyLimitUSD *float64) (*domain.APIKey, error) {
 	item := &domain.APIKey{
-		ID:             uuid.NewString(),
-		Name:           name,
-		KeyPrefix:      keyPrefix,
-		ContentLogging: contentLogging,
-		Enabled:        true,
-		CreatedAt:      time.Now().UTC(),
+		ID:              uuid.NewString(),
+		Name:            name,
+		KeyPrefix:       keyPrefix,
+		ContentLogging:  contentLogging,
+		Enabled:         true,
+		MonthlyLimitUSD: monthlyLimitUSD,
+		CreatedAt:       time.Now().UTC(),
 	}
 	_, err := s.db.ExecContext(ctx, `
-		insert into api_keys(id, name, key_prefix, key_hash, content_logging, enabled, created_at)
-		values (?, ?, ?, ?, ?, 1, ?)
-	`, item.ID, item.Name, item.KeyPrefix, keyHash, boolToInt(contentLogging), item.CreatedAt.Format(time.RFC3339Nano))
+		insert into api_keys(id, name, key_prefix, key_hash, content_logging, enabled, monthly_limit_usd, created_at)
+		values (?, ?, ?, ?, ?, 1, ?, ?)
+	`, item.ID, item.Name, item.KeyPrefix, keyHash, boolToInt(contentLogging), nullableFloat(monthlyLimitUSD), item.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, fmt.Errorf("create api key: %w", err)
 	}
@@ -155,7 +190,7 @@ func (s *Store) CreateAPIKey(ctx context.Context, name, keyPrefix, keyHash strin
 
 func (s *Store) ListAPIKeys(ctx context.Context) ([]domain.APIKey, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		select id, name, key_prefix, content_logging, enabled, created_at, coalesce(last_used_at, '')
+		select id, name, key_prefix, content_logging, enabled, created_at, coalesce(last_used_at, ''), monthly_limit_usd
 		from api_keys
 		order by created_at desc
 	`)
@@ -168,11 +203,15 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]domain.APIKey, error) {
 		var item domain.APIKey
 		var createdAt, lastUsedAt string
 		var contentLogging, enabled int
-		if err := rows.Scan(&item.ID, &item.Name, &item.KeyPrefix, &contentLogging, &enabled, &createdAt, &lastUsedAt); err != nil {
+		var monthlyLimit sql.NullFloat64
+		if err := rows.Scan(&item.ID, &item.Name, &item.KeyPrefix, &contentLogging, &enabled, &createdAt, &lastUsedAt, &monthlyLimit); err != nil {
 			return nil, fmt.Errorf("scan api key: %w", err)
 		}
 		item.ContentLogging = contentLogging == 1
 		item.Enabled = enabled == 1
+		if monthlyLimit.Valid {
+			item.MonthlyLimitUSD = &monthlyLimit.Float64
+		}
 		item.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 		if lastUsedAt != "" {
 			item.LastUsedAt, _ = time.Parse(time.RFC3339Nano, lastUsedAt)
@@ -184,14 +223,15 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]domain.APIKey, error) {
 
 func (s *Store) AuthenticateAPIKey(ctx context.Context, keyHash string) (*domain.APIKey, error) {
 	row := s.db.QueryRowContext(ctx, `
-		select id, name, key_prefix, content_logging, enabled, created_at, coalesce(last_used_at, '')
+		select id, name, key_prefix, content_logging, enabled, created_at, coalesce(last_used_at, ''), monthly_limit_usd
 		from api_keys
 		where key_hash = ?
 	`, keyHash)
 	var item domain.APIKey
 	var createdAt, lastUsedAt string
 	var contentLogging, enabled int
-	if err := row.Scan(&item.ID, &item.Name, &item.KeyPrefix, &contentLogging, &enabled, &createdAt, &lastUsedAt); err != nil {
+	var monthlyLimit sql.NullFloat64
+	if err := row.Scan(&item.ID, &item.Name, &item.KeyPrefix, &contentLogging, &enabled, &createdAt, &lastUsedAt, &monthlyLimit); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -199,6 +239,9 @@ func (s *Store) AuthenticateAPIKey(ctx context.Context, keyHash string) (*domain
 	}
 	item.ContentLogging = contentLogging == 1
 	item.Enabled = enabled == 1
+	if monthlyLimit.Valid {
+		item.MonthlyLimitUSD = &monthlyLimit.Float64
+	}
 	item.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	if lastUsedAt != "" {
 		item.LastUsedAt, _ = time.Parse(time.RFC3339Nano, lastUsedAt)
@@ -422,6 +465,91 @@ func (s *Store) DashboardMetrics(ctx context.Context) (*domain.DashboardMetrics,
 		item.LastRequestAt, _ = time.Parse(time.RFC3339Nano, lastRequestAt)
 	}
 	return &item, nil
+}
+
+func (s *Store) GetAPIKeyMonthlyUsage(ctx context.Context, apiKeyID, month string) (*domain.APIKeyUsageSummary, error) {
+	row := s.db.QueryRowContext(ctx, `
+		select
+			rl.api_key_id,
+			coalesce(ak.name, ''),
+			?,
+			count(*),
+			coalesce(sum(rl.input_tokens), 0),
+			coalesce(sum(rl.output_tokens), 0),
+			coalesce(sum(rl.total_tokens), 0),
+			coalesce(sum(rl.estimated_cost_usd), 0),
+			ak.monthly_limit_usd
+		from request_logs rl
+		left join api_keys ak on ak.id = rl.api_key_id
+		where rl.api_key_id = ? and substr(rl.started_at, 1, 7) = ?
+		group by rl.api_key_id
+	`, month, apiKeyID, month)
+
+	var summary domain.APIKeyUsageSummary
+	var monthlyLimitUSD sql.NullFloat64
+	if err := row.Scan(&summary.APIKeyID, &summary.APIKeyName, &summary.Month, &summary.Requests, &summary.InputTokens, &summary.OutputTokens, &summary.TotalTokens, &summary.EstimatedCostUSD, &monthlyLimitUSD); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("scan monthly usage: %w", err)
+	}
+
+	if monthlyLimitUSD.Valid {
+		summary.MonthlyLimitUSD = &monthlyLimitUSD.Float64
+		summary.IsOverLimit = summary.EstimatedCostUSD > monthlyLimitUSD.Float64
+	}
+
+	return &summary, nil
+}
+
+func (s *Store) ListAPIKeyUsage(ctx context.Context, month string) ([]domain.APIKeyUsageSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		select
+			rl.api_key_id,
+			coalesce(ak.name, ''),
+			?,
+			count(*),
+			coalesce(sum(rl.input_tokens), 0),
+			coalesce(sum(rl.output_tokens), 0),
+			coalesce(sum(rl.total_tokens), 0),
+			coalesce(sum(rl.estimated_cost_usd), 0),
+			ak.monthly_limit_usd
+		from request_logs rl
+		left join api_keys ak on ak.id = rl.api_key_id
+		where substr(rl.started_at, 1, 7) = ?
+		group by rl.api_key_id
+		order by rl.api_key_id asc
+	`, month, month)
+	if err != nil {
+		return nil, fmt.Errorf("query monthly usage: %w", err)
+	}
+	defer rows.Close()
+
+	var summaries []domain.APIKeyUsageSummary
+	for rows.Next() {
+		var summary domain.APIKeyUsageSummary
+		var monthlyLimitUSD sql.NullFloat64
+		if err := rows.Scan(&summary.APIKeyID, &summary.APIKeyName, &summary.Month, &summary.Requests, &summary.InputTokens, &summary.OutputTokens, &summary.TotalTokens, &summary.EstimatedCostUSD, &monthlyLimitUSD); err != nil {
+			return nil, fmt.Errorf("scan monthly usage: %w", err)
+		}
+
+		if monthlyLimitUSD.Valid {
+			summary.MonthlyLimitUSD = &monthlyLimitUSD.Float64
+			summary.IsOverLimit = summary.EstimatedCostUSD > monthlyLimitUSD.Float64
+		}
+
+		summaries = append(summaries, summary)
+	}
+
+	return summaries, nil
+}
+
+func (s *Store) UpdateAPIKeyLimit(ctx context.Context, id string, limit *float64) error {
+	_, err := s.db.ExecContext(ctx, `update api_keys set monthly_limit_usd = ? where id = ?`, nullableFloat(limit), id)
+	if err != nil {
+		return fmt.Errorf("update api key limit: %w", err)
+	}
+	return nil
 }
 
 type scanner interface {
