@@ -579,7 +579,7 @@ func newModelsCommand(configPath *string) *cobra.Command {
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use:   "sync",
-		Short: "Discover Bedrock foundation models and upsert them as aliases",
+		Short: "Discover Bedrock inference profiles and upsert them as aliases",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
@@ -600,18 +600,18 @@ func newModelsCommand(configPath *string) *cobra.Command {
 				return err
 			}
 			client := bedrock.NewFromConfig(awsCfg)
-			out, err := client.ListFoundationModels(cmd.Context(), &bedrock.ListFoundationModelsInput{})
+			out, err := client.ListInferenceProfiles(cmd.Context(), &bedrock.ListInferenceProfilesInput{})
 			if err != nil {
 				return err
 			}
-			for _, summary := range out.ModelSummaries {
-				modelID := awsString(summary.ModelId)
-				if modelID == "" {
+			for _, summary := range out.InferenceProfileSummaries {
+				profileID := awsString(summary.InferenceProfileId)
+				if profileID == "" {
 					continue
 				}
 				_, err := store.UpsertModelRoute(cmd.Context(), domain.ModelRoute{
-					Alias:          modelID,
-					BedrockModelID: modelID,
+					Alias:          profileID,
+					BedrockModelID: profileID,
 					Region:         cfg.Upstream.Region,
 					Enabled:        true,
 				})
@@ -619,7 +619,7 @@ func newModelsCommand(configPath *string) *cobra.Command {
 					return err
 				}
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Synced %d models into routes\n", len(out.ModelSummaries))
+			fmt.Fprintf(cmd.OutOrStdout(), "Synced %d inference profiles into routes\n", len(out.InferenceProfileSummaries))
 			return nil
 		},
 	})
