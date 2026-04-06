@@ -153,10 +153,17 @@ The Responses API support is currently text-oriented:
 
 - string or message-style `input`
 - `instructions`
+- function tool definitions via `tools`
+- model-emitted function calls
+- text or JSON `function_call_output` follow-up inputs
 - `previous_response_id` chaining against in-memory server state
 - SSE streaming for text output
 
-Tool calling and other advanced Responses item types are not yet supported.
+Currently unsupported:
+
+- non-function tool types
+- multimodal tool outputs
+- persisted response storage beyond the running server process
 
 Log into the admin UI at `http://127.0.0.1:8080/` with the generated `admin` password.
 

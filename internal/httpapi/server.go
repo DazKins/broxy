@@ -251,7 +251,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		previous = &item
 	}
-	messages, system, err := normalizeResponseInput(req, previous)
+	normalized, err := normalizeResponseRequest(req, previous)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -264,10 +264,16 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	converseReq := domain.ConverseRequest{
 		ModelID:     bedrockModelID,
 		Region:      region,
-		Messages:    messages,
-		System:      system,
+		Messages:    normalized.Messages,
+		System:      normalized.System,
 		Temperature: temp,
 		MaxTokens:   maxTokens,
+		Tools:       normalized.Tools,
+		ToolChoice:  normalized.ToolChoice,
+	}
+	if normalized.ToolChoice != nil && normalized.ToolChoice.Type == "none" {
+		converseReq.Tools = nil
+		converseReq.ToolChoice = nil
 	}
 	upstreamResp, err := s.provider.Converse(r.Context(), converseReq)
 	finishedAt := time.Now().UTC()
@@ -317,17 +323,25 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	defer s.logRequest(r.Context(), record)
 
 	responseID := "resp_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	response := buildResponseEnvelope(responseID, req, upstreamResp.Text, upstreamResp.Usage)
-	s.storeResponse(responseID, storedResponse{
-		Response: response,
-		System:   cloneStrings(system),
-		Messages: append(cloneMessages(messages), domain.BedrockChatMessage{
+	response := buildResponseEnvelope(responseID, req, normalized, upstreamResp)
+	message := upstreamResp.Message
+	if len(message.Blocks) == 0 && strings.TrimSpace(message.Content) == "" && strings.TrimSpace(upstreamResp.Text) != "" {
+		message = domain.BedrockChatMessage{
 			Role:    "assistant",
 			Content: upstreamResp.Text,
-		}),
+			Blocks: []domain.BedrockContentBlock{{
+				Type: "text",
+				Text: upstreamResp.Text,
+			}},
+		}
+	}
+	s.storeResponse(responseID, storedResponse{
+		Response: response,
+		System:   cloneStrings(normalized.System),
+		Messages: append(cloneMessages(normalized.Messages), message),
 	})
 	if req.Stream {
-		s.streamResponsesResponse(w, response, upstreamResp.Text)
+		s.streamResponsesResponse(w, response)
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
@@ -723,7 +737,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, model string, upstreamRes
 	flusher.Flush()
 }
 
-func (s *Server) streamResponsesResponse(w http.ResponseWriter, response map[string]any, text string) {
+func (s *Server) streamResponsesResponse(w http.ResponseWriter, response map[string]any) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -734,88 +748,124 @@ func (s *Server) streamResponsesResponse(w http.ResponseWriter, response map[str
 	}
 
 	output, _ := response["output"].([]map[string]any)
-	if len(output) == 0 {
-		writeError(w, http.StatusInternalServerError, "response output missing")
-		return
+	responseID, _ := response["id"].(string)
+	sequence := 0
+	writeEvent := func(payload map[string]any) {
+		payload["sequence_number"] = sequence
+		payload["response_id"] = responseID
+		writeSSE(w, payload)
+		flusher.Flush()
+		sequence++
 	}
-	item := output[0]
-	itemID, _ := item["id"].(string)
 
-	writeSSE(w, map[string]any{
+	writeEvent(map[string]any{
 		"type":     "response.created",
 		"response": cloneResponseForEvent(response, "in_progress", []map[string]any{}),
 	})
-	flusher.Flush()
-	writeSSE(w, map[string]any{
+	writeEvent(map[string]any{
 		"type":     "response.in_progress",
 		"response": cloneResponseForEvent(response, "in_progress", []map[string]any{}),
 	})
-	flusher.Flush()
-	writeSSE(w, map[string]any{
-		"type":         "response.output_item.added",
-		"output_index": 0,
-		"item": map[string]any{
-			"id":      itemID,
-			"type":    "message",
-			"status":  "in_progress",
-			"role":    "assistant",
-			"content": []map[string]any{},
-		},
-	})
-	flusher.Flush()
-	writeSSE(w, map[string]any{
-		"type":          "response.content_part.added",
-		"item_id":       itemID,
-		"output_index":  0,
-		"content_index": 0,
-		"part": map[string]any{
-			"type":        "output_text",
-			"text":        "",
-			"annotations": []any{},
-		},
-	})
-	flusher.Flush()
-	for _, chunk := range chunkText(text, 48) {
-		writeSSE(w, map[string]any{
-			"type":          "response.output_text.delta",
-			"item_id":       itemID,
-			"output_index":  0,
-			"content_index": 0,
-			"delta":         chunk,
-		})
-		flusher.Flush()
+	for outputIndex, item := range output {
+		itemType, _ := item["type"].(string)
+		itemID, _ := item["id"].(string)
+		switch itemType {
+		case "message":
+			writeEvent(map[string]any{
+				"type":         "response.output_item.added",
+				"output_index": outputIndex,
+				"item": map[string]any{
+					"id":      itemID,
+					"type":    "message",
+					"status":  "in_progress",
+					"role":    "assistant",
+					"content": []map[string]any{},
+				},
+			})
+			content, _ := item["content"].([]map[string]any)
+			for contentIndex, part := range content {
+				text, _ := part["text"].(string)
+				writeEvent(map[string]any{
+					"type":          "response.content_part.added",
+					"item_id":       itemID,
+					"output_index":  outputIndex,
+					"content_index": contentIndex,
+					"part": map[string]any{
+						"type":        "output_text",
+						"text":        "",
+						"annotations": []any{},
+					},
+				})
+				for _, chunk := range chunkText(text, 48) {
+					writeEvent(map[string]any{
+						"type":          "response.output_text.delta",
+						"item_id":       itemID,
+						"output_index":  outputIndex,
+						"content_index": contentIndex,
+						"delta":         chunk,
+					})
+				}
+				writeEvent(map[string]any{
+					"type":          "response.output_text.done",
+					"item_id":       itemID,
+					"output_index":  outputIndex,
+					"content_index": contentIndex,
+					"text":          text,
+				})
+				writeEvent(map[string]any{
+					"type":          "response.content_part.done",
+					"item_id":       itemID,
+					"output_index":  outputIndex,
+					"content_index": contentIndex,
+					"part":          part,
+				})
+			}
+			writeEvent(map[string]any{
+				"type":         "response.output_item.done",
+				"output_index": outputIndex,
+				"item":         item,
+			})
+		case "function_call":
+			writeEvent(map[string]any{
+				"type":         "response.output_item.added",
+				"output_index": outputIndex,
+				"item": map[string]any{
+					"id":        itemID,
+					"type":      "function_call",
+					"status":    "in_progress",
+					"call_id":   item["call_id"],
+					"name":      item["name"],
+					"arguments": "",
+				},
+			})
+			arguments, _ := item["arguments"].(string)
+			for _, chunk := range chunkText(arguments, 96) {
+				writeEvent(map[string]any{
+					"type":         "response.function_call_arguments.delta",
+					"item_id":      itemID,
+					"output_index": outputIndex,
+					"delta":        chunk,
+				})
+			}
+			writeEvent(map[string]any{
+				"type":         "response.function_call_arguments.done",
+				"item_id":      itemID,
+				"output_index": outputIndex,
+				"arguments":    arguments,
+				"name":         item["name"],
+				"call_id":      item["call_id"],
+			})
+			writeEvent(map[string]any{
+				"type":         "response.output_item.done",
+				"output_index": outputIndex,
+				"item":         item,
+			})
+		}
 	}
-	writeSSE(w, map[string]any{
-		"type":          "response.output_text.done",
-		"item_id":       itemID,
-		"output_index":  0,
-		"content_index": 0,
-		"text":          text,
-	})
-	flusher.Flush()
-	writeSSE(w, map[string]any{
-		"type":          "response.content_part.done",
-		"item_id":       itemID,
-		"output_index":  0,
-		"content_index": 0,
-		"part": map[string]any{
-			"type":        "output_text",
-			"text":        text,
-			"annotations": []any{},
-		},
-	})
-	flusher.Flush()
-	writeSSE(w, map[string]any{
-		"type":         "response.output_item.done",
-		"output_index": 0,
-		"item":         item,
-	})
-	flusher.Flush()
-	writeSSE(w, map[string]any{
+	writeEvent(map[string]any{
 		"type":     "response.completed",
 		"response": response,
 	})
-	flusher.Flush()
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }

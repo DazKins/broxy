@@ -54,6 +54,77 @@ func (p *recordingProvider) Requests() []domain.ConverseRequest {
 	return items
 }
 
+type toolProvider struct {
+	mu       sync.Mutex
+	requests []domain.ConverseRequest
+}
+
+func (p *toolProvider) Converse(ctx context.Context, req domain.ConverseRequest) (*domain.ConverseResponse, error) {
+	p.mu.Lock()
+	p.requests = append(p.requests, req)
+	p.mu.Unlock()
+
+	if hasToolResult(req.Messages) {
+		return &domain.ConverseResponse{
+			ModelID: req.ModelID,
+			Text:    "tool completed",
+			Message: domain.BedrockChatMessage{
+				Role: "assistant",
+				Blocks: []domain.BedrockContentBlock{{
+					Type: "text",
+					Text: "tool completed",
+				}},
+			},
+			StopReason: "end_turn",
+			Usage: domain.TokenUsage{
+				Input:  20,
+				Output: 4,
+				Total:  24,
+			},
+			LatencyMS: 42,
+		}, nil
+	}
+
+	return &domain.ConverseResponse{
+		ModelID: req.ModelID,
+		Message: domain.BedrockChatMessage{
+			Role: "assistant",
+			Blocks: []domain.BedrockContentBlock{{
+				Type:      "tool_use",
+				ToolUseID: "call_exec_1",
+				ToolName:  "exec_command",
+				ToolInput: []byte(`{"cmd":"pwd"}`),
+			}},
+		},
+		StopReason: "tool_use",
+		Usage: domain.TokenUsage{
+			Input:  12,
+			Output: 8,
+			Total:  20,
+		},
+		LatencyMS: 42,
+	}, nil
+}
+
+func (p *toolProvider) Requests() []domain.ConverseRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	items := make([]domain.ConverseRequest, len(p.requests))
+	copy(items, p.requests)
+	return items
+}
+
+func hasToolResult(messages []domain.BedrockChatMessage) bool {
+	for _, msg := range messages {
+		for _, block := range msg.Blocks {
+			if block.Type == "tool_result" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func TestChatCompletionProxy(t *testing.T) {
 	tempDir := t.TempDir()
 	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
@@ -344,6 +415,265 @@ func TestResponsesProxyStreaming(t *testing.T) {
 	}
 	if !strings.Contains(bodyText, "data: [DONE]") {
 		t.Fatalf("missing DONE marker: %s", bodyText)
+	}
+}
+
+func TestResponsesProxyToolCall(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	provider := &toolProvider{}
+	server := New(cfg, store, provider, "test")
+
+	body := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": "run pwd",
+		"tools": []map[string]any{{
+			"type":        "function",
+			"name":        "exec_command",
+			"description": "Run a command",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"cmd": map[string]any{"type": "string"},
+				},
+				"required": []string{"cmd"},
+			},
+		}},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID     string `json:"id"`
+		Output []struct {
+			Type      string `json:"type"`
+			Name      string `json:"name"`
+			CallID    string `json:"call_id"`
+			Arguments string `json:"arguments"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(resp.Output) != 1 || resp.Output[0].Type != "function_call" {
+		t.Fatalf("unexpected output: %s", rec.Body.String())
+	}
+	if resp.Output[0].Name != "exec_command" || resp.Output[0].CallID != "call_exec_1" || resp.Output[0].Arguments != "{\"cmd\":\"pwd\"}" {
+		t.Fatalf("unexpected function call item: %#v", resp.Output[0])
+	}
+
+	requests := provider.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if len(requests[0].Tools) != 1 || requests[0].Tools[0].Name != "exec_command" {
+		t.Fatalf("unexpected tools = %#v", requests[0].Tools)
+	}
+	if requests[0].ToolChoice == nil || requests[0].ToolChoice.Type != "auto" {
+		t.Fatalf("unexpected default tool choice = %#v", requests[0].ToolChoice)
+	}
+
+	secondBody := map[string]any{
+		"model":                "claude-haiku-4-5",
+		"previous_response_id": resp.ID,
+		"input": []map[string]any{{
+			"type":    "function_call_output",
+			"call_id": "call_exec_1",
+			"output":  "/Users/personal/broxy",
+		}},
+	}
+	secondPayload, _ := json.Marshal(secondBody)
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(secondPayload))
+	secondReq.Header.Set("Authorization", "Bearer bpx_test_secret")
+	secondRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(secondRec, secondReq)
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("second status = %d body=%s", secondRec.Code, secondRec.Body.String())
+	}
+	var secondResp struct {
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(secondRec.Body.Bytes(), &secondResp); err != nil {
+		t.Fatalf("json.Unmarshal() second error = %v", err)
+	}
+	if len(secondResp.Output) != 1 || len(secondResp.Output[0].Content) != 1 || secondResp.Output[0].Content[0].Text != "tool completed" {
+		t.Fatalf("unexpected second response: %s", secondRec.Body.String())
+	}
+
+	requests = provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if len(requests[1].Messages) != 3 {
+		t.Fatalf("unexpected chained messages = %#v", requests[1].Messages)
+	}
+	if requests[1].Messages[1].Blocks[0].Type != "tool_use" || requests[1].Messages[2].Blocks[0].Type != "tool_result" {
+		t.Fatalf("unexpected tool messages = %#v", requests[1].Messages)
+	}
+}
+
+func TestResponsesProxyToolCallJSONOutput(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	provider := &toolProvider{}
+	server := New(cfg, store, provider, "test")
+
+	initial := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": "run pwd",
+		"tools": []map[string]any{{
+			"type": "function",
+			"name": "exec_command",
+			"parameters": map[string]any{
+				"type": "object",
+			},
+		}},
+	}
+	payload, _ := json.Marshal(initial)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var initialResp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &initialResp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	followUp := map[string]any{
+		"model":                "claude-haiku-4-5",
+		"previous_response_id": initialResp.ID,
+		"input": []map[string]any{{
+			"type":    "function_call_output",
+			"call_id": "call_exec_1",
+			"output": map[string]any{
+				"cwd": "/Users/personal/broxy",
+			},
+		}},
+	}
+	followPayload, _ := json.Marshal(followUp)
+	followReq := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(followPayload))
+	followReq.Header.Set("Authorization", "Bearer bpx_test_secret")
+	followRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(followRec, followReq)
+	if followRec.Code != http.StatusOK {
+		t.Fatalf("follow-up status = %d body=%s", followRec.Code, followRec.Body.String())
+	}
+
+	requests := provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	toolResult := requests[1].Messages[2].Blocks[0]
+	if toolResult.Type != "tool_result" || len(toolResult.ToolResult) != 1 || toolResult.ToolResult[0].Type != "json" || string(toolResult.ToolResult[0].JSON) != "{\"cwd\":\"/Users/personal/broxy\"}" {
+		t.Fatalf("unexpected tool result payload = %#v", toolResult)
+	}
+}
+
+func TestResponsesProxyToolCallStreaming(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	server := New(cfg, store, &toolProvider{}, "test")
+	body := map[string]any{
+		"model":  "claude-haiku-4-5",
+		"input":  "run pwd",
+		"stream": true,
+		"tools": []map[string]any{{
+			"type": "function",
+			"name": "exec_command",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"cmd": map[string]any{"type": "string"},
+				},
+			},
+		}},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	bodyText := rec.Body.String()
+	if !strings.Contains(bodyText, "\"type\":\"response.function_call_arguments.delta\"") {
+		t.Fatalf("missing function_call_arguments delta event: %s", bodyText)
+	}
+	if !strings.Contains(bodyText, "\"type\":\"response.function_call_arguments.done\"") {
+		t.Fatalf("missing function_call_arguments done event: %s", bodyText)
 	}
 }
 

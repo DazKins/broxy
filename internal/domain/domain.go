@@ -97,9 +97,39 @@ type AuthenticatedKey struct {
 	PlaintextValue string
 }
 
+type ToolDefinition struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Parameters  []byte `json:"parameters,omitempty"`
+	Strict      *bool  `json:"strict,omitempty"`
+}
+
+type ToolChoice struct {
+	Type         string   `json:"type"`
+	Name         string   `json:"name,omitempty"`
+	AllowedNames []string `json:"allowed_names,omitempty"`
+}
+
+type ToolResultContent struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+	JSON []byte `json:"json,omitempty"`
+}
+
+type BedrockContentBlock struct {
+	Type             string              `json:"type"`
+	Text             string              `json:"text,omitempty"`
+	ToolUseID        string              `json:"tool_use_id,omitempty"`
+	ToolName         string              `json:"tool_name,omitempty"`
+	ToolInput        []byte              `json:"tool_input,omitempty"`
+	ToolResultStatus string              `json:"tool_result_status,omitempty"`
+	ToolResult       []ToolResultContent `json:"tool_result,omitempty"`
+}
+
 type BedrockChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string                `json:"role"`
+	Content string                `json:"content,omitempty"`
+	Blocks  []BedrockContentBlock `json:"blocks,omitempty"`
 }
 
 type ConverseRequest struct {
@@ -109,6 +139,8 @@ type ConverseRequest struct {
 	System      []string
 	Temperature *float64
 	MaxTokens   *int
+	Tools       []ToolDefinition
+	ToolChoice  *ToolChoice
 }
 
 type TokenUsage struct {
@@ -118,13 +150,14 @@ type TokenUsage struct {
 }
 
 type ConverseResponse struct {
-	ModelID     string     `json:"model_id"`
-	Text        string     `json:"text"`
-	StopReason  string     `json:"stop_reason"`
-	Usage       TokenUsage `json:"usage"`
-	LatencyMS   int64      `json:"latency_ms"`
-	RequestID   string     `json:"request_id"`
-	RawResponse string     `json:"raw_response,omitempty"`
+	ModelID     string             `json:"model_id"`
+	Text        string             `json:"text"`
+	Message     BedrockChatMessage `json:"message"`
+	StopReason  string             `json:"stop_reason"`
+	Usage       TokenUsage         `json:"usage"`
+	LatencyMS   int64              `json:"latency_ms"`
+	RequestID   string             `json:"request_id"`
+	RawResponse string             `json:"raw_response,omitempty"`
 }
 
 type APIKeyUsageSummary struct {
