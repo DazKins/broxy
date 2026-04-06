@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +32,26 @@ func (fakeProvider) Converse(ctx context.Context, req domain.ConverseRequest) (*
 		},
 		LatencyMS: 42,
 	}, nil
+}
+
+type recordingProvider struct {
+	mu       sync.Mutex
+	requests []domain.ConverseRequest
+}
+
+func (p *recordingProvider) Converse(ctx context.Context, req domain.ConverseRequest) (*domain.ConverseResponse, error) {
+	p.mu.Lock()
+	p.requests = append(p.requests, req)
+	p.mu.Unlock()
+	return fakeProvider{}.Converse(ctx, req)
+}
+
+func (p *recordingProvider) Requests() []domain.ConverseRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	items := make([]domain.ConverseRequest, len(p.requests))
+	copy(items, p.requests)
+	return items
 }
 
 func TestChatCompletionProxy(t *testing.T) {
@@ -102,6 +124,229 @@ func TestChatCompletionProxy(t *testing.T) {
 	}
 }
 
+func TestResponsesProxy(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	server := New(cfg, store, fakeProvider{}, "test")
+	body := map[string]any{
+		"model":        "claude-haiku-4-5",
+		"instructions": "You are helpful.",
+		"input": []map[string]any{
+			{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "hello"},
+				},
+			},
+		},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Object string `json:"object"`
+		Model  string `json:"model"`
+		Output []struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Usage struct {
+			TotalTokens int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if resp.Object != "response" {
+		t.Fatalf("object = %q", resp.Object)
+	}
+	if resp.Model != "claude-haiku-4-5" {
+		t.Fatalf("response model = %q", resp.Model)
+	}
+	if len(resp.Output) != 1 || len(resp.Output[0].Content) != 1 {
+		t.Fatalf("unexpected output shape: %s", rec.Body.String())
+	}
+	if resp.Output[0].Content[0].Text != "hello from bedrock" {
+		t.Fatalf("output text = %q", resp.Output[0].Content[0].Text)
+	}
+	if resp.Usage.TotalTokens != 20 {
+		t.Fatalf("total tokens = %d", resp.Usage.TotalTokens)
+	}
+}
+
+func TestResponsesProxyPreviousResponseID(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	provider := &recordingProvider{}
+	server := New(cfg, store, provider, "test")
+
+	firstBody := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": "hello",
+	}
+	payload, _ := json.Marshal(firstBody)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var firstResp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &firstResp); err != nil {
+		t.Fatalf("json.Unmarshal() first error = %v", err)
+	}
+
+	secondBody := map[string]any{
+		"model":                "claude-haiku-4-5",
+		"previous_response_id": firstResp.ID,
+		"input":                "follow up",
+	}
+	secondPayload, _ := json.Marshal(secondBody)
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(secondPayload))
+	secondReq.Header.Set("Authorization", "Bearer bpx_test_secret")
+	secondRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(secondRec, secondReq)
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("second status = %d body=%s", secondRec.Code, secondRec.Body.String())
+	}
+
+	requests := provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if len(requests[1].Messages) != 3 {
+		t.Fatalf("second request messages = %#v", requests[1].Messages)
+	}
+	if requests[1].Messages[0].Content != "hello" || requests[1].Messages[1].Content != "hello from bedrock" || requests[1].Messages[2].Content != "follow up" {
+		t.Fatalf("unexpected chained messages = %#v", requests[1].Messages)
+	}
+}
+
+func TestResponsesProxyStreaming(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	server := New(cfg, store, fakeProvider{}, "test")
+	body := map[string]any{
+		"model":  "claude-haiku-4-5",
+		"input":  "hello",
+		"stream": true,
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	bodyText := rec.Body.String()
+	if !strings.Contains(bodyText, "\"type\":\"response.output_text.delta\"") {
+		t.Fatalf("missing output_text delta event: %s", bodyText)
+	}
+	if !strings.Contains(bodyText, "\"type\":\"response.completed\"") {
+		t.Fatalf("missing response completed event: %s", bodyText)
+	}
+	if !strings.Contains(bodyText, "data: [DONE]") {
+		t.Fatalf("missing DONE marker: %s", bodyText)
+	}
+}
+
 func TestChatCompletionRateLimitEnforcement(t *testing.T) {
 	tempDir := t.TempDir()
 	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
@@ -120,10 +365,6 @@ func TestChatCompletionRateLimitEnforcement(t *testing.T) {
 		},
 	}
 
-	// Seed a pricing entry so requests have non-zero cost.
-	// fakeProvider returns 12 input + 8 output tokens.
-	// At $1/M input and $1/M output, each request costs ~$0.00002.
-	// With a limit of $0.0001, 5 requests ($0.0001) should exceed it.
 	if err := store.UpsertPricingEntries(context.Background(), []domain.PricingEntry{
 		{
 			ModelID:          "us.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -137,8 +378,7 @@ func TestChatCompletionRateLimitEnforcement(t *testing.T) {
 	}
 
 	limit := 0.0001
-	_, err = store.CreateAPIKey(context.Background(), "limited", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, &limit)
-	if err != nil {
+	if _, err := store.CreateAPIKey(context.Background(), "limited", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, &limit); err != nil {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}
 	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
@@ -160,7 +400,6 @@ func TestChatCompletionRateLimitEnforcement(t *testing.T) {
 	}
 	payload, _ := json.Marshal(body)
 
-	// Send enough requests to exceed the limit.
 	for i := 0; i < 10; i++ {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(payload))
@@ -168,7 +407,6 @@ func TestChatCompletionRateLimitEnforcement(t *testing.T) {
 		server.Router().ServeHTTP(rec, req)
 	}
 
-	// This request should be over limit.
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer bpx_test_secret")
@@ -224,7 +462,6 @@ func TestKeyUsageEndpoint(t *testing.T) {
 
 	server := New(cfg, store, fakeProvider{}, "test")
 
-	// Make a request to generate some usage.
 	body := map[string]any{
 		"model": "claude-haiku-4-5",
 		"messages": []map[string]any{
@@ -240,19 +477,15 @@ func TestKeyUsageEndpoint(t *testing.T) {
 		t.Fatalf("chat request failed: status = %d", rec.Code)
 	}
 
-	// Query the usage endpoint (unauthenticated for simplicity — it's behind admin middleware).
-	// We need to create an admin session cookie.
 	adminUser := domain.AdminUser{
 		Username:     "admin",
 		PasswordHash: "irrelevant",
 	}
 	_ = store.UpsertAdminUser(context.Background(), adminUser)
 
-	// Login to get cookie
 	loginPayload, _ := json.Marshal(map[string]string{"username": "admin", "password": "test"})
 	_ = loginPayload
 
-	// Instead, query the usage from the store directly.
 	monthStr := time.Now().UTC().Format("2006-01")
 	usage, err := store.GetAPIKeyMonthlyUsage(context.Background(), key.ID, monthStr)
 	if err != nil {

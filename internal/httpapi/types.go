@@ -80,6 +80,15 @@ func messageText(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &direct); err == nil {
 		return direct, nil
 	}
+	var single struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &single); err == nil {
+		if single.Type == "" || single.Type == "text" || single.Type == "input_text" || single.Type == "output_text" {
+			return single.Text, nil
+		}
+	}
 	var parts []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -87,7 +96,7 @@ func messageText(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &parts); err == nil {
 		var builder strings.Builder
 		for _, part := range parts {
-			if part.Type == "" || part.Type == "text" {
+			if part.Type == "" || part.Type == "text" || part.Type == "input_text" || part.Type == "output_text" {
 				builder.WriteString(part.Text)
 			}
 		}

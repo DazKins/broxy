@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -34,6 +35,8 @@ type Server struct {
 	sessions  *securecookie.SecureCookie
 	startedAt time.Time
 	version   string
+	respMu    sync.RWMutex
+	responses map[string]storedResponse
 }
 
 func New(cfg *config.Config, store *db.Store, provider Provider, version string) *Server {
@@ -46,6 +49,7 @@ func New(cfg *config.Config, store *db.Store, provider Provider, version string)
 		sessions:  securecookie.New(hashKey, blockKey[:16]),
 		startedAt: time.Now().UTC(),
 		version:   version,
+		responses: map[string]storedResponse{},
 	}
 }
 
@@ -60,6 +64,8 @@ func (s *Server) Router() http.Handler {
 		r.Use(s.requireClientAPIKey)
 		r.Get("/models", s.handleListModels)
 		r.Post("/chat/completions", s.handleChatCompletions)
+		r.Post("/responses", s.handleResponses)
+		r.Get("/responses/{id}", s.handleGetResponse)
 	})
 	r.Route("/api/admin", func(r chi.Router) {
 		r.Post("/auth/login", s.handleAdminLogin)
@@ -161,7 +167,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			LatencyMS:      finishedAt.Sub(startedAt).Milliseconds(),
 			ErrorText:      err.Error(),
 			ContentLogged:  apiKey.ContentLogging,
-			RequestJSON:    s.maybeLoggedRequest(apiKey.ContentLogging, req),
+			RequestJSON:    s.maybeLoggedJSON(apiKey.ContentLogging, req),
 			Stream:         req.Stream,
 		})
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -185,7 +191,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		TotalTokens:       upstreamResp.Usage.Total,
 		EstimatedCostUSD:  cost,
 		ContentLogged:     apiKey.ContentLogging,
-		RequestJSON:       s.maybeLoggedRequest(apiKey.ContentLogging, req),
+		RequestJSON:       s.maybeLoggedJSON(apiKey.ContentLogging, req),
 		ResponseText:      s.maybeLogText(apiKey.ContentLogging, upstreamResp.Text),
 		UpstreamRequestID: upstreamResp.RequestID,
 		Stream:            req.Stream,
@@ -218,6 +224,122 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
+	apiKey := clientKeyFromContext(r.Context())
+	if apiKey == nil {
+		writeError(w, http.StatusUnauthorized, "missing client authentication")
+		return
+	}
+	startedAt := time.Now().UTC()
+	var req ResponseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+		return
+	}
+	if strings.TrimSpace(req.Model) == "" {
+		writeError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	var previous *storedResponse
+	if req.PreviousResponseID != "" {
+		item, ok := s.lookupResponse(req.PreviousResponseID)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "previous_response_id not found")
+			return
+		}
+		previous = &item
+	}
+	messages, system, err := normalizeResponseInput(req, previous)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	route, bedrockModelID, region, temp, maxTokens, err := s.resolveModel(r.Context(), req.Model, req.Temperature, req.MaxOutputTokens)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	converseReq := domain.ConverseRequest{
+		ModelID:     bedrockModelID,
+		Region:      region,
+		Messages:    messages,
+		System:      system,
+		Temperature: temp,
+		MaxTokens:   maxTokens,
+	}
+	upstreamResp, err := s.provider.Converse(r.Context(), converseReq)
+	finishedAt := time.Now().UTC()
+	if err != nil {
+		s.logRequest(r.Context(), domain.RequestRecord{
+			StartedAt:      startedAt,
+			FinishedAt:     finishedAt,
+			APIKeyID:       apiKey.ID,
+			Method:         r.Method,
+			Path:           r.URL.Path,
+			ModelName:      req.Model,
+			BedrockModelID: bedrockModelID,
+			Region:         region,
+			StatusCode:     http.StatusBadGateway,
+			LatencyMS:      finishedAt.Sub(startedAt).Milliseconds(),
+			ErrorText:      err.Error(),
+			ContentLogged:  apiKey.ContentLogging,
+			RequestJSON:    s.maybeLoggedJSON(apiKey.ContentLogging, req),
+			Stream:         req.Stream,
+		})
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	costEntry, _ := s.store.GetPricingEntry(r.Context(), upstreamResp.ModelID, region)
+	cost := pricing.EstimateCost(costEntry, upstreamResp.Usage)
+	record := domain.RequestRecord{
+		StartedAt:         startedAt,
+		FinishedAt:        finishedAt,
+		APIKeyID:          apiKey.ID,
+		Method:            r.Method,
+		Path:              r.URL.Path,
+		ModelName:         coalesceRouteName(route, req.Model),
+		BedrockModelID:    upstreamResp.ModelID,
+		Region:            region,
+		StatusCode:        http.StatusOK,
+		LatencyMS:         upstreamResp.LatencyMS,
+		InputTokens:       upstreamResp.Usage.Input,
+		OutputTokens:      upstreamResp.Usage.Output,
+		TotalTokens:       upstreamResp.Usage.Total,
+		EstimatedCostUSD:  cost,
+		ContentLogged:     apiKey.ContentLogging,
+		RequestJSON:       s.maybeLoggedJSON(apiKey.ContentLogging, req),
+		ResponseText:      s.maybeLogText(apiKey.ContentLogging, upstreamResp.Text),
+		UpstreamRequestID: upstreamResp.RequestID,
+		Stream:            req.Stream,
+	}
+	defer s.logRequest(r.Context(), record)
+
+	responseID := "resp_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	response := buildResponseEnvelope(responseID, req, upstreamResp.Text, upstreamResp.Usage)
+	s.storeResponse(responseID, storedResponse{
+		Response: response,
+		System:   cloneStrings(system),
+		Messages: append(cloneMessages(messages), domain.BedrockChatMessage{
+			Role:    "assistant",
+			Content: upstreamResp.Text,
+		}),
+	})
+	if req.Stream {
+		s.streamResponsesResponse(w, response, upstreamResp.Text)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleGetResponse(w http.ResponseWriter, r *http.Request) {
+	response, ok := s.lookupResponse(chi.URLParam(r, "id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "response not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Response)
 }
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
@@ -601,11 +723,118 @@ func (s *Server) streamResponse(w http.ResponseWriter, model string, upstreamRes
 	flusher.Flush()
 }
 
+func (s *Server) streamResponsesResponse(w http.ResponseWriter, response map[string]any, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	output, _ := response["output"].([]map[string]any)
+	if len(output) == 0 {
+		writeError(w, http.StatusInternalServerError, "response output missing")
+		return
+	}
+	item := output[0]
+	itemID, _ := item["id"].(string)
+
+	writeSSE(w, map[string]any{
+		"type":     "response.created",
+		"response": cloneResponseForEvent(response, "in_progress", []map[string]any{}),
+	})
+	flusher.Flush()
+	writeSSE(w, map[string]any{
+		"type":     "response.in_progress",
+		"response": cloneResponseForEvent(response, "in_progress", []map[string]any{}),
+	})
+	flusher.Flush()
+	writeSSE(w, map[string]any{
+		"type":         "response.output_item.added",
+		"output_index": 0,
+		"item": map[string]any{
+			"id":      itemID,
+			"type":    "message",
+			"status":  "in_progress",
+			"role":    "assistant",
+			"content": []map[string]any{},
+		},
+	})
+	flusher.Flush()
+	writeSSE(w, map[string]any{
+		"type":          "response.content_part.added",
+		"item_id":       itemID,
+		"output_index":  0,
+		"content_index": 0,
+		"part": map[string]any{
+			"type":        "output_text",
+			"text":        "",
+			"annotations": []any{},
+		},
+	})
+	flusher.Flush()
+	for _, chunk := range chunkText(text, 48) {
+		writeSSE(w, map[string]any{
+			"type":          "response.output_text.delta",
+			"item_id":       itemID,
+			"output_index":  0,
+			"content_index": 0,
+			"delta":         chunk,
+		})
+		flusher.Flush()
+	}
+	writeSSE(w, map[string]any{
+		"type":          "response.output_text.done",
+		"item_id":       itemID,
+		"output_index":  0,
+		"content_index": 0,
+		"text":          text,
+	})
+	flusher.Flush()
+	writeSSE(w, map[string]any{
+		"type":          "response.content_part.done",
+		"item_id":       itemID,
+		"output_index":  0,
+		"content_index": 0,
+		"part": map[string]any{
+			"type":        "output_text",
+			"text":        text,
+			"annotations": []any{},
+		},
+	})
+	flusher.Flush()
+	writeSSE(w, map[string]any{
+		"type":         "response.output_item.done",
+		"output_index": 0,
+		"item":         item,
+	})
+	flusher.Flush()
+	writeSSE(w, map[string]any{
+		"type":     "response.completed",
+		"response": response,
+	})
+	flusher.Flush()
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
+func cloneResponseForEvent(response map[string]any, status string, output []map[string]any) map[string]any {
+	cloned := make(map[string]any, len(response))
+	for k, v := range response {
+		cloned[k] = v
+	}
+	cloned["status"] = status
+	cloned["output"] = output
+	return cloned
+}
+
 func (s *Server) logRequest(ctx context.Context, record domain.RequestRecord) {
 	_ = s.store.CreateRequestLog(ctx, record)
 }
 
-func (s *Server) maybeLoggedRequest(enabled bool, req ChatCompletionRequest) string {
+func (s *Server) maybeLoggedJSON(enabled bool, req any) string {
 	if !enabled {
 		return ""
 	}
@@ -618,6 +847,19 @@ func (s *Server) maybeLogText(enabled bool, value string) string {
 		return ""
 	}
 	return value
+}
+
+func (s *Server) storeResponse(id string, item storedResponse) {
+	s.respMu.Lock()
+	defer s.respMu.Unlock()
+	s.responses[id] = item
+}
+
+func (s *Server) lookupResponse(id string) (storedResponse, bool) {
+	s.respMu.RLock()
+	defer s.respMu.RUnlock()
+	item, ok := s.responses[id]
+	return item, ok
 }
 
 type clientKeyContextKey struct{}

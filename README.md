@@ -6,6 +6,8 @@
 
 - OpenAI-style endpoints:
   - `POST /v1/chat/completions`
+  - `POST /v1/responses`
+  - `GET /v1/responses/{response_id}`
   - `GET /v1/models`
   - `GET /healthz`
 - Embedded admin UI for:
@@ -133,6 +135,28 @@ curl http://127.0.0.1:8080/v1/chat/completions \
     "messages": [{"role":"user","content":"Say hello in one sentence."}]
   }'
 ```
+
+Responses API example:
+
+```bash
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Authorization: Bearer YOUR_PROXY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-haiku-4-5",
+    "instructions": "You are a helpful assistant.",
+    "input": "Say hello in one sentence."
+  }'
+```
+
+The Responses API support is currently text-oriented:
+
+- string or message-style `input`
+- `instructions`
+- `previous_response_id` chaining against in-memory server state
+- SSE streaming for text output
+
+Tool calling and other advanced Responses item types are not yet supported.
 
 Log into the admin UI at `http://127.0.0.1:8080/` with the generated `admin` password.
 
