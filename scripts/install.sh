@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO="${BROXY_INSTALL_REPO:-personal/broxy}"
+REPO="${BROXY_INSTALL_REPO:-DazKins/broxy}"
 INSTALL_BIN_DIR="${BROXY_INSTALL_BIN_DIR:-$HOME/.local/bin}"
 CONFIG_PATH="${BROXY_CONFIG_PATH:-}"
 VERSION="${BROXY_VERSION:-}"
