@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/personal/broxy/internal/config"
 	"github.com/personal/broxy/internal/db"
 	"github.com/personal/broxy/internal/domain"
+	"github.com/personal/broxy/internal/logging"
 	"github.com/personal/broxy/internal/pricing"
 	"github.com/personal/broxy/internal/security"
 	"github.com/personal/broxy/internal/ui"
@@ -36,6 +38,7 @@ type Server struct {
 	sessions  *securecookie.SecureCookie
 	startedAt time.Time
 	version   string
+	logger    *slog.Logger
 	respMu    sync.RWMutex
 	responses map[string]storedResponse
 }
@@ -47,6 +50,10 @@ var responsesUpgrader = websocket.Upgrader{
 }
 
 func New(cfg *config.Config, store *db.Store, provider Provider, version string) *Server {
+	return NewWithLogger(cfg, store, provider, version, logging.FromEnv())
+}
+
+func NewWithLogger(cfg *config.Config, store *db.Store, provider Provider, version string, logger *slog.Logger) *Server {
 	hashKey := []byte(cfg.SessionSecret)
 	blockKey := []byte(cfg.SessionSecret)
 	return &Server{
@@ -56,6 +63,7 @@ func New(cfg *config.Config, store *db.Store, provider Provider, version string)
 		sessions:  securecookie.New(hashKey, blockKey[:16]),
 		startedAt: time.Now().UTC(),
 		version:   version,
+		logger:    logger,
 		responses: map[string]storedResponse{},
 	}
 }
@@ -162,6 +170,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	upstreamResp, err := s.provider.Converse(r.Context(), converseReq)
 	finishedAt := time.Now().UTC()
 	if err != nil {
+		statusCode := upstreamStatusCode(err)
 		s.logRequest(r.Context(), domain.RequestRecord{
 			StartedAt:      startedAt,
 			FinishedAt:     finishedAt,
@@ -171,14 +180,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			ModelName:      req.Model,
 			BedrockModelID: bedrockModelID,
 			Region:         region,
-			StatusCode:     http.StatusBadGateway,
+			StatusCode:     statusCode,
 			LatencyMS:      finishedAt.Sub(startedAt).Milliseconds(),
 			ErrorText:      err.Error(),
 			ContentLogged:  apiKey.ContentLogging,
 			RequestJSON:    s.maybeLoggedJSON(apiKey.ContentLogging, req),
 			Stream:         req.Stream,
 		})
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, statusCode, err.Error())
 		return
 	}
 	costEntry, _ := s.store.GetPricingEntry(r.Context(), upstreamResp.ModelID, region)
@@ -345,6 +354,7 @@ func (s *Server) processResponseRequest(ctx context.Context, apiKey *domain.APIK
 	upstreamResp, err := s.provider.Converse(ctx, converseReq)
 	finishedAt := time.Now().UTC()
 	if err != nil {
+		statusCode := upstreamStatusCode(err)
 		s.logRequest(ctx, domain.RequestRecord{
 			StartedAt:      startedAt,
 			FinishedAt:     finishedAt,
@@ -354,14 +364,14 @@ func (s *Server) processResponseRequest(ctx context.Context, apiKey *domain.APIK
 			ModelName:      req.Model,
 			BedrockModelID: bedrockModelID,
 			Region:         region,
-			StatusCode:     http.StatusBadGateway,
+			StatusCode:     statusCode,
 			LatencyMS:      finishedAt.Sub(startedAt).Milliseconds(),
 			ErrorText:      err.Error(),
 			ContentLogged:  apiKey.ContentLogging,
 			RequestJSON:    s.maybeLoggedJSON(apiKey.ContentLogging, req),
 			Stream:         req.Stream,
 		})
-		return nil, http.StatusBadGateway, err
+		return nil, statusCode, err
 	}
 	costEntry, _ := s.store.GetPricingEntry(ctx, upstreamResp.ModelID, region)
 	cost := pricing.EstimateCost(costEntry, upstreamResp.Usage)
@@ -390,6 +400,7 @@ func (s *Server) processResponseRequest(ctx context.Context, apiKey *domain.APIK
 
 	responseID := "resp_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	response := buildResponseEnvelope(responseID, req, normalized, upstreamResp)
+	s.logResponseDebug(path, responseID, req, upstreamResp, response)
 	message := upstreamResp.Message
 	if len(message.Blocks) == 0 && strings.TrimSpace(message.Content) == "" && strings.TrimSpace(upstreamResp.Text) != "" {
 		message = domain.BedrockChatMessage{
@@ -407,6 +418,19 @@ func (s *Server) processResponseRequest(ctx context.Context, apiKey *domain.APIK
 		Messages: append(cloneMessages(normalized.Messages), message),
 	})
 	return response, http.StatusOK, nil
+}
+
+func upstreamStatusCode(err error) int {
+	type httpStatusCoder interface {
+		HTTPStatusCode() int
+	}
+	var statusErr httpStatusCoder
+	if errors.As(err, &statusErr) {
+		if statusCode := statusErr.HTTPStatusCode(); statusCode > 0 {
+			return statusCode
+		}
+	}
+	return http.StatusBadGateway
 }
 
 func (s *Server) handleGetResponse(w http.ResponseWriter, r *http.Request) {
@@ -997,6 +1021,39 @@ func (s *Server) maybeLogText(enabled bool, value string) string {
 		return ""
 	}
 	return value
+}
+
+func (s *Server) logResponseDebug(path string, responseID string, req ResponseRequest, upstreamResp *domain.ConverseResponse, response map[string]any) {
+	if s.logger == nil {
+		return
+	}
+	output, _ := response["output"].([]map[string]any)
+	hasToolCall := false
+	emptyToolArguments := false
+	for _, item := range output {
+		if itemType, _ := item["type"].(string); itemType == "function_call" {
+			hasToolCall = true
+			if arguments, _ := item["arguments"].(string); strings.TrimSpace(arguments) == "{}" {
+				emptyToolArguments = true
+			}
+		}
+	}
+	s.logger.Debug("responses upstream response",
+		"path", path,
+		"response_id", responseID,
+		"model", req.Model,
+		"stream", req.Stream,
+		"stop_reason", upstreamResp.StopReason,
+		"input_tokens", upstreamResp.Usage.Input,
+		"output_tokens", upstreamResp.Usage.Output,
+		"total_tokens", upstreamResp.Usage.Total,
+		"text_bytes", len(upstreamResp.Text),
+		"message_blocks", len(upstreamResp.Message.Blocks),
+		"output_items", len(output),
+		"has_tool_call", hasToolCall,
+		"empty_tool_arguments", emptyToolArguments,
+		"raw_response", upstreamResp.RawResponse,
+	)
 }
 
 func (s *Server) storeResponse(id string, item storedResponse) {

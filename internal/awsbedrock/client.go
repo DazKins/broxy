@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,20 +18,40 @@ import (
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/personal/broxy/internal/config"
 	"github.com/personal/broxy/internal/domain"
+	"github.com/personal/broxy/internal/logging"
 )
 
 type Client struct {
 	upstream config.UpstreamConfig
 	http     *http.Client
 	aws      *bedrockruntime.Client
+	logger   *slog.Logger
+}
+
+type statusError struct {
+	statusCode int
+	message    string
+}
+
+func (e *statusError) Error() string {
+	return e.message
+}
+
+func (e *statusError) HTTPStatusCode() int {
+	return e.statusCode
 }
 
 func New(ctx context.Context, upstream config.UpstreamConfig) (*Client, error) {
+	return NewWithLogger(ctx, upstream, logging.FromEnv())
+}
+
+func NewWithLogger(ctx context.Context, upstream config.UpstreamConfig, logger *slog.Logger) (*Client, error) {
 	client := &Client{
 		upstream: upstream,
 		http: &http.Client{
 			Timeout: 5 * time.Minute,
 		},
+		logger: logger,
 	}
 	if upstream.Mode == config.UpstreamAuthAWS {
 		loadOptions := []func(*awsconfig.LoadOptions) error{
@@ -56,6 +77,7 @@ func (c *Client) Converse(ctx context.Context, req domain.ConverseRequest) (*dom
 }
 
 func (c *Client) converseAWS(ctx context.Context, req domain.ConverseRequest) (*domain.ConverseResponse, error) {
+	c.logConverseRequest(req)
 	messages := make([]brtypes.Message, 0, len(req.Messages))
 	for _, msg := range req.Messages {
 		content, err := sdkContentBlocks(msg)
@@ -126,6 +148,7 @@ func (c *Client) converseAWS(ctx context.Context, req domain.ConverseRequest) (*
 	}
 	raw, _ := json.Marshal(out)
 	resp.RawResponse = string(raw)
+	c.logConverseResponse(req, resp)
 	return resp, nil
 }
 
@@ -141,33 +164,11 @@ func (c *Client) converseBearer(ctx context.Context, req domain.ConverseRequest)
 	if err != nil {
 		return nil, fmt.Errorf("build bedrock URL: %w", err)
 	}
-	payload := map[string]any{
-		"messages": transformJSONMessages(req.Messages),
+	payload, err := buildConversePayload(req)
+	if err != nil {
+		return nil, err
 	}
-	if len(req.System) > 0 {
-		system := make([]map[string]string, 0, len(req.System))
-		for _, prompt := range req.System {
-			system = append(system, map[string]string{"text": prompt})
-		}
-		payload["system"] = system
-	}
-	if req.MaxTokens != nil || req.Temperature != nil {
-		cfg := map[string]any{}
-		if req.MaxTokens != nil {
-			cfg["maxTokens"] = *req.MaxTokens
-		}
-		if req.Temperature != nil {
-			cfg["temperature"] = *req.Temperature
-		}
-		payload["inferenceConfig"] = cfg
-	}
-	if len(req.Tools) > 0 {
-		toolConfig, err := jsonToolConfig(req.Tools, req.ToolChoice)
-		if err != nil {
-			return nil, fmt.Errorf("build tool config: %w", err)
-		}
-		payload["toolConfig"] = toolConfig
-	}
+	c.logConverseRequest(req)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal converse payload: %w", err)
@@ -189,7 +190,10 @@ func (c *Client) converseBearer(ctx context.Context, req domain.ConverseRequest)
 		return nil, fmt.Errorf("read converse response: %w", err)
 	}
 	if httpResp.StatusCode >= 400 {
-		return nil, fmt.Errorf("bedrock converse status %d: %s", httpResp.StatusCode, strings.TrimSpace(string(respBody)))
+		return nil, &statusError{
+			statusCode: httpResp.StatusCode,
+			message:    fmt.Sprintf("bedrock converse status %d: %s", httpResp.StatusCode, strings.TrimSpace(string(respBody))),
+		}
 	}
 	type jsonResponse struct {
 		Output struct {
@@ -220,7 +224,7 @@ func (c *Client) converseBearer(ctx context.Context, req domain.ConverseRequest)
 	if parsed.Metrics.LatencyMS > 0 {
 		latency = parsed.Metrics.LatencyMS
 	}
-	return &domain.ConverseResponse{
+	resp := &domain.ConverseResponse{
 		ModelID: req.ModelID,
 		Text:    parsedText(blocks),
 		Message: domain.BedrockChatMessage{
@@ -236,7 +240,9 @@ func (c *Client) converseBearer(ctx context.Context, req domain.ConverseRequest)
 		LatencyMS:   latency,
 		RequestID:   httpResp.Header.Get("x-amzn-requestid"),
 		RawResponse: string(respBody),
-	}, nil
+	}
+	c.logConverseResponse(req, resp)
+	return resp, nil
 }
 
 func sdkContentBlocks(message domain.BedrockChatMessage) ([]brtypes.ContentBlock, error) {
@@ -548,6 +554,37 @@ func jsonToolConfig(tools []domain.ToolDefinition, choice *domain.ToolChoice) (m
 	return cfg, nil
 }
 
+func buildConversePayload(req domain.ConverseRequest) (map[string]any, error) {
+	payload := map[string]any{
+		"messages": transformJSONMessages(req.Messages),
+	}
+	if len(req.System) > 0 {
+		system := make([]map[string]string, 0, len(req.System))
+		for _, prompt := range req.System {
+			system = append(system, map[string]string{"text": prompt})
+		}
+		payload["system"] = system
+	}
+	if req.MaxTokens != nil || req.Temperature != nil {
+		cfg := map[string]any{}
+		if req.MaxTokens != nil {
+			cfg["maxTokens"] = *req.MaxTokens
+		}
+		if req.Temperature != nil {
+			cfg["temperature"] = *req.Temperature
+		}
+		payload["inferenceConfig"] = cfg
+	}
+	if len(req.Tools) > 0 {
+		toolConfig, err := jsonToolConfig(req.Tools, req.ToolChoice)
+		if err != nil {
+			return nil, fmt.Errorf("build tool config: %w", err)
+		}
+		payload["toolConfig"] = toolConfig
+	}
+	return payload, nil
+}
+
 func decodeLazyDocument(raw []byte) (brdocument.Interface, error) {
 	if len(raw) == 0 {
 		return brdocument.NewLazyDocument(map[string]any{}), nil
@@ -578,4 +615,64 @@ func nonEmptyJSON(raw []byte, fallback []byte) []byte {
 		return fallback
 	}
 	return raw
+}
+
+func (c *Client) logConverseResponse(req domain.ConverseRequest, resp *domain.ConverseResponse) {
+	if c.logger == nil {
+		return
+	}
+	c.logger.Debug("bedrock converse response",
+		"model_id", req.ModelID,
+		"region", req.Region,
+		"stop_reason", resp.StopReason,
+		"input_tokens", resp.Usage.Input,
+		"output_tokens", resp.Usage.Output,
+		"total_tokens", resp.Usage.Total,
+		"latency_ms", resp.LatencyMS,
+		"request_id", resp.RequestID,
+		"text_bytes", len(resp.Text),
+		"message_blocks", len(resp.Message.Blocks),
+		"raw_response", resp.RawResponse,
+	)
+}
+
+func (c *Client) logConverseRequest(req domain.ConverseRequest) {
+	if c.logger == nil {
+		return
+	}
+	payload, err := buildConversePayload(req)
+	if err != nil {
+		c.logger.Debug("bedrock converse request",
+			"model_id", req.ModelID,
+			"region", req.Region,
+			"tool_count", len(req.Tools),
+			"message_count", len(req.Messages),
+			"system_count", len(req.System),
+			"tool_choice", req.ToolChoice,
+			"payload_error", err.Error(),
+		)
+		return
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		c.logger.Debug("bedrock converse request",
+			"model_id", req.ModelID,
+			"region", req.Region,
+			"tool_count", len(req.Tools),
+			"message_count", len(req.Messages),
+			"system_count", len(req.System),
+			"tool_choice", req.ToolChoice,
+			"payload_error", err.Error(),
+		)
+		return
+	}
+	c.logger.Debug("bedrock converse request",
+		"model_id", req.ModelID,
+		"region", req.Region,
+		"tool_count", len(req.Tools),
+		"message_count", len(req.Messages),
+		"system_count", len(req.System),
+		"tool_choice", req.ToolChoice,
+		"raw_request", string(body),
+	)
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,6 +21,7 @@ import (
 	"github.com/personal/broxy/internal/db"
 	"github.com/personal/broxy/internal/domain"
 	"github.com/personal/broxy/internal/httpapi"
+	"github.com/personal/broxy/internal/logging"
 	"github.com/personal/broxy/internal/pricing"
 	"github.com/personal/broxy/internal/security"
 	"github.com/personal/broxy/internal/service"
@@ -145,14 +147,14 @@ func newServeCommand(configPath *string) *cobra.Command {
 		Use:   "serve",
 		Short: "Run the proxy server and embedded admin UI",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, store, provider, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			cfg, store, provider, logger, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
 			defer cleanup()
 			server := &http.Server{
 				Addr:    cfg.ListenAddr,
-				Handler: httpapi.New(cfg, store, provider, Version).Router(),
+				Handler: httpapi.NewWithLogger(cfg, store, provider, Version, logger).Router(),
 			}
 			errCh := make(chan error, 1)
 			go func() {
@@ -418,7 +420,7 @@ func newAdminCommand(configPath *string) *cobra.Command {
 		Use:   "reset-password",
 		Short: "Reset the local admin password and print the new value",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			_, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
@@ -449,7 +451,7 @@ func newAPIKeyCommand(configPath *string) *cobra.Command {
 			if name == "" {
 				return fmt.Errorf("--name is required")
 			}
-			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			_, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
@@ -481,7 +483,7 @@ func newAPIKeyCommand(configPath *string) *cobra.Command {
 		Use:   "list",
 		Short: "List API keys",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			_, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
@@ -506,7 +508,7 @@ func newAPIKeyCommand(configPath *string) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			limit, _ := cmd.Flags().GetFloat64("monthly-limit")
-			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			_, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
@@ -533,7 +535,7 @@ func newAPIKeyCommand(configPath *string) *cobra.Command {
 		Short: "Disable an API key",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			_, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
@@ -549,7 +551,7 @@ func newAPIKeyCommand(configPath *string) *cobra.Command {
 			if month == "" {
 				month = time.Now().UTC().Format("2006-01")
 			}
-			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			_, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
@@ -597,7 +599,7 @@ func newModelsCommand(configPath *string) *cobra.Command {
 			if alias == "" || modelID == "" || region == "" {
 				return fmt.Errorf("--alias, --model-id, and --region are required")
 			}
-			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			_, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
@@ -637,7 +639,7 @@ func newModelsCommand(configPath *string) *cobra.Command {
 		Use:   "list",
 		Short: "List model routes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			_, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
@@ -656,7 +658,7 @@ func newModelsCommand(configPath *string) *cobra.Command {
 		Use:   "sync",
 		Short: "Discover Bedrock inference profiles and upsert them as aliases",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			cfg, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
@@ -710,7 +712,7 @@ func newUsageCommand(configPath *string) *cobra.Command {
 		Use:   "report",
 		Short: "Print token and cost breakdown grouped by day/model/key",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			_, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
@@ -737,7 +739,7 @@ func newLogsCommand(configPath *string) *cobra.Command {
 		Use:   "tail",
 		Short: "Print recent request logs",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, store, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			_, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
@@ -755,35 +757,36 @@ func newLogsCommand(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func bootstrap(ctx context.Context, configPath string) (*cfgpkg.Config, *db.Store, *awsbedrock.Client, func(), error) {
+func bootstrap(ctx context.Context, configPath string) (*cfgpkg.Config, *db.Store, *awsbedrock.Client, *slog.Logger, func(), error) {
 	path, err := cfgpkg.ConfigPath(configPath)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	cfg, err := cfgpkg.Load(path)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("load config %s: %w", path, err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("load config %s: %w", path, err)
 	}
 	if err := cfgpkg.EnsureLayout(cfg); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	if err := cfgpkg.MigrateLegacyState(path, cfg); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	store, err := db.Open(cfg.DBPath)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	if err := seedPricing(ctx, store, cfg.PricingPath); err != nil {
 		store.Close()
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
-	provider, err := awsbedrock.New(ctx, cfg.Upstream)
+	logger := logging.FromEnv()
+	provider, err := awsbedrock.NewWithLogger(ctx, cfg.Upstream, logger)
 	if err != nil {
 		store.Close()
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
-	return cfg, store, provider, func() {
+	return cfg, store, provider, logger, func() {
 		_ = store.Close()
 	}, nil
 }

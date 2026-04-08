@@ -209,6 +209,7 @@ func CapturedEnvironment() map[string]string {
 		"PATH",
 		"USER",
 		"LOGNAME",
+		"BROXY_LOG_LEVEL",
 		"AWS_PROFILE",
 		"AWS_REGION",
 		"AWS_DEFAULT_REGION",

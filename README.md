@@ -93,6 +93,8 @@ broxy service uninstall
 
 On Linux, the service runs as a user service and starts automatically after that user logs in. On macOS, it runs as a LaunchAgent for the logged-in user.
 
+Set `BROXY_LOG_LEVEL=debug` before starting or restarting the service to enable debug logging, including raw upstream Responses API payloads in the service logs.
+
 ## First-time setup without the installer
 
 ```bash

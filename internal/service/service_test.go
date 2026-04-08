@@ -60,3 +60,12 @@ func TestRenderDarwinService(t *testing.T) {
 		t.Fatalf("darwin plist missing config args: %s", body)
 	}
 }
+
+func TestCapturedEnvironmentIncludesLogLevel(t *testing.T) {
+	t.Setenv("BROXY_LOG_LEVEL", "debug")
+
+	env := CapturedEnvironment()
+	if env["BROXY_LOG_LEVEL"] != "debug" {
+		t.Fatalf("CapturedEnvironment() missing BROXY_LOG_LEVEL, got %#v", env)
+	}
+}

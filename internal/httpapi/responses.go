@@ -43,6 +43,29 @@ type normalizedResponseRequest struct {
 }
 
 func normalizeResponseRequest(req ResponseRequest, previous *storedResponse) (*normalizedResponseRequest, error) {
+	finalize := func(messages []domain.BedrockChatMessage, system []string) (*normalizedResponseRequest, error) {
+		normalizedMessages, normalizedSystem, err := normalizeBedrockConversation(messages, system)
+		if err != nil {
+			return nil, err
+		}
+		tools, toolsResp, err := parseResponseTools(req.Tools)
+		if err != nil {
+			return nil, err
+		}
+		choice, choiceValue, err := parseResponseToolChoice(req.ToolChoice, len(tools) > 0)
+		if err != nil {
+			return nil, err
+		}
+		return &normalizedResponseRequest{
+			Messages:        normalizedMessages,
+			System:          normalizedSystem,
+			Tools:           tools,
+			ToolChoice:      choice,
+			ToolsResponse:   toolsResp,
+			ToolChoiceValue: choiceValue,
+		}, nil
+	}
+
 	var messages []domain.BedrockChatMessage
 	var system []string
 	if previous != nil {
@@ -62,43 +85,13 @@ func normalizeResponseRequest(req ResponseRequest, previous *storedResponse) (*n
 		if len(messages) == 0 && len(system) == 0 {
 			return nil, fmt.Errorf("input is required")
 		}
-		tools, toolsResp, err := parseResponseTools(req.Tools)
-		if err != nil {
-			return nil, err
-		}
-		choice, choiceValue, err := parseResponseToolChoice(req.ToolChoice, len(tools) > 0)
-		if err != nil {
-			return nil, err
-		}
-		return &normalizedResponseRequest{
-			Messages:        messages,
-			System:          system,
-			Tools:           tools,
-			ToolChoice:      choice,
-			ToolsResponse:   toolsResp,
-			ToolChoiceValue: choiceValue,
-		}, nil
+		return finalize(messages, system)
 	}
 
 	var direct string
 	if err := json.Unmarshal(req.Input, &direct); err == nil {
 		appendResponseMessage(&messages, "user", domain.BedrockContentBlock{Type: "text", Text: direct})
-		tools, toolsResp, err := parseResponseTools(req.Tools)
-		if err != nil {
-			return nil, err
-		}
-		choice, choiceValue, err := parseResponseToolChoice(req.ToolChoice, len(tools) > 0)
-		if err != nil {
-			return nil, err
-		}
-		return &normalizedResponseRequest{
-			Messages:        messages,
-			System:          system,
-			Tools:           tools,
-			ToolChoice:      choice,
-			ToolsResponse:   toolsResp,
-			ToolChoiceValue: choiceValue,
-		}, nil
+		return finalize(messages, system)
 	}
 
 	var single json.RawMessage
@@ -109,22 +102,7 @@ func normalizeResponseRequest(req ResponseRequest, previous *storedResponse) (*n
 		}
 		messages = mergeResponseMessages(messages, msgs)
 		system = append(system, sys...)
-		tools, toolsResp, err := parseResponseTools(req.Tools)
-		if err != nil {
-			return nil, err
-		}
-		choice, choiceValue, err := parseResponseToolChoice(req.ToolChoice, len(tools) > 0)
-		if err != nil {
-			return nil, err
-		}
-		return &normalizedResponseRequest{
-			Messages:        messages,
-			System:          system,
-			Tools:           tools,
-			ToolChoice:      choice,
-			ToolsResponse:   toolsResp,
-			ToolChoiceValue: choiceValue,
-		}, nil
+		return finalize(messages, system)
 	}
 
 	var items []json.RawMessage
@@ -139,22 +117,46 @@ func normalizeResponseRequest(req ResponseRequest, previous *storedResponse) (*n
 		messages = mergeResponseMessages(messages, msgs)
 		system = append(system, sys...)
 	}
-	tools, toolsResp, err := parseResponseTools(req.Tools)
-	if err != nil {
-		return nil, err
+	return finalize(messages, system)
+}
+
+func normalizeBedrockConversation(messages []domain.BedrockChatMessage, system []string) ([]domain.BedrockChatMessage, []string, error) {
+	for len(messages) > 0 && messages[0].Role == "assistant" {
+		if !assistantMessageCanBecomeSystem(messages[0]) {
+			return nil, nil, fmt.Errorf("conversation must start with a user message")
+		}
+		text := strings.TrimSpace(assistantMessageText(messages[0]))
+		if text != "" {
+			system = append(system, "Previous assistant message:\n"+text)
+		}
+		messages = messages[1:]
 	}
-	choice, choiceValue, err := parseResponseToolChoice(req.ToolChoice, len(tools) > 0)
-	if err != nil {
-		return nil, err
+	if len(messages) == 0 {
+		return nil, nil, fmt.Errorf("conversation must include at least one user message")
 	}
-	return &normalizedResponseRequest{
-		Messages:        messages,
-		System:          system,
-		Tools:           tools,
-		ToolChoice:      choice,
-		ToolsResponse:   toolsResp,
-		ToolChoiceValue: choiceValue,
-	}, nil
+	if messages[0].Role != "user" {
+		return nil, nil, fmt.Errorf("conversation must start with a user message")
+	}
+	return messages, system, nil
+}
+
+func assistantMessageCanBecomeSystem(message domain.BedrockChatMessage) bool {
+	if len(message.Blocks) == 0 {
+		return true
+	}
+	for _, block := range message.Blocks {
+		if block.Type != "" && block.Type != "text" {
+			return false
+		}
+	}
+	return true
+}
+
+func assistantMessageText(message domain.BedrockChatMessage) string {
+	if len(message.Blocks) > 0 {
+		return blocksText(message.Blocks)
+	}
+	return message.Content
 }
 
 func parseResponseInputItem(raw json.RawMessage) ([]domain.BedrockChatMessage, []string, error) {

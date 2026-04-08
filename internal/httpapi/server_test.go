@@ -16,6 +16,7 @@ import (
 	"github.com/personal/broxy/internal/config"
 	"github.com/personal/broxy/internal/db"
 	"github.com/personal/broxy/internal/domain"
+	"github.com/personal/broxy/internal/logging"
 	"github.com/personal/broxy/internal/security"
 )
 
@@ -60,6 +61,27 @@ type toolProvider struct {
 	requests []domain.ConverseRequest
 }
 
+type errorProvider struct {
+	err error
+}
+
+func (p errorProvider) Converse(ctx context.Context, req domain.ConverseRequest) (*domain.ConverseResponse, error) {
+	return nil, p.err
+}
+
+type upstreamStatusError struct {
+	statusCode int
+	message    string
+}
+
+func (e upstreamStatusError) Error() string {
+	return e.message
+}
+
+func (e upstreamStatusError) HTTPStatusCode() int {
+	return e.statusCode
+}
+
 func (p *toolProvider) Converse(ctx context.Context, req domain.ConverseRequest) (*domain.ConverseResponse, error) {
 	p.mu.Lock()
 	p.requests = append(p.requests, req)
@@ -82,7 +104,8 @@ func (p *toolProvider) Converse(ctx context.Context, req domain.ConverseRequest)
 				Output: 4,
 				Total:  24,
 			},
-			LatencyMS: 42,
+			LatencyMS:   42,
+			RawResponse: `{"output":{"message":{"content":[{"text":"tool completed"}]}},"stopReason":"end_turn"}`,
 		}, nil
 	}
 
@@ -103,7 +126,8 @@ func (p *toolProvider) Converse(ctx context.Context, req domain.ConverseRequest)
 			Output: 8,
 			Total:  20,
 		},
-		LatencyMS: 42,
+		LatencyMS:   42,
+		RawResponse: `{"output":{"message":{"content":[{"toolUse":{"toolUseId":"call_exec_1","name":"exec_command","input":{"cmd":"pwd"}}}]}},"stopReason":"tool_use"}`,
 	}, nil
 }
 
@@ -623,6 +647,140 @@ func TestResponsesProxyToolCallJSONOutput(t *testing.T) {
 	}
 }
 
+func TestResponsesProxyMovesLeadingAssistantContextIntoSystem(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	provider := &recordingProvider{}
+	server := New(cfg, store, provider, "test")
+	body := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": []map[string]any{
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "Earlier answer",
+				}},
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]any{{
+					"type": "input_text",
+					"text": "New request",
+				}},
+			},
+		},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	requests := provider.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if len(requests[0].Messages) != 1 || requests[0].Messages[0].Role != "user" || requests[0].Messages[0].Content != "New request" {
+		t.Fatalf("unexpected upstream messages = %#v", requests[0].Messages)
+	}
+	if len(requests[0].System) != 1 || requests[0].System[0] != "Previous assistant message:\nEarlier answer" {
+		t.Fatalf("unexpected upstream system = %#v", requests[0].System)
+	}
+}
+
+func TestResponsesProxyReturnsUpstreamClientStatus(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	server := New(cfg, store, errorProvider{
+		err: upstreamStatusError{
+			statusCode: http.StatusBadRequest,
+			message:    "bedrock converse: validation failed",
+		},
+	}, "test")
+	body := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": "hello",
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	logs, err := store.ListRequestLogs(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListRequestLogs() error = %v", err)
+	}
+	if len(logs) != 1 || logs[0].StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected logs = %#v", logs)
+	}
+}
+
 func TestResponsesProxyToolCallStreaming(t *testing.T) {
 	tempDir := t.TempDir()
 	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
@@ -675,6 +833,58 @@ func TestResponsesProxyToolCallStreaming(t *testing.T) {
 	}
 	if !strings.Contains(bodyText, "\"type\":\"response.function_call_arguments.done\"") {
 		t.Fatalf("missing function_call_arguments done event: %s", bodyText)
+	}
+}
+
+func TestResponsesDebugLogsRawUpstreamResponse(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+
+	var logs bytes.Buffer
+	logger := logging.New("debug", &logs)
+	logger = logger.With("component", "test")
+
+	server := NewWithLogger(cfg, store, &toolProvider{}, "test", logger)
+	body := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": "run pwd",
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	logText := logs.String()
+	if !strings.Contains(logText, "responses upstream response") {
+		t.Fatalf("missing debug log entry: %s", logText)
+	}
+	if !strings.Contains(logText, `toolUseId\":\"call_exec_1`) {
+		t.Fatalf("missing raw upstream response in log: %s", logText)
+	}
+	if !strings.Contains(logText, "empty_tool_arguments=false") {
+		t.Fatalf("missing tool argument summary in log: %s", logText)
 	}
 }
 
