@@ -213,6 +213,7 @@ func CapturedEnvironment() map[string]string {
 		"AWS_PROFILE",
 		"AWS_REGION",
 		"AWS_DEFAULT_REGION",
+		"AWS_BEARER_TOKEN_BEDROCK",
 		"HTTP_PROXY",
 		"http_proxy",
 		"HTTPS_PROXY",

@@ -25,6 +25,23 @@ func TestDefaultForPathUsesStateDirForCustomConfigPath(t *testing.T) {
 	}
 }
 
+func TestDefaultForPathUsesBearerModeWhenBearerEnvSet(t *testing.T) {
+	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "env-token")
+
+	configPath := filepath.Join(t.TempDir(), "custom", "config.json")
+	cfg, err := DefaultForPath(configPath)
+	if err != nil {
+		t.Fatalf("DefaultForPath() error = %v", err)
+	}
+
+	if cfg.Upstream.Mode != UpstreamAuthBearer {
+		t.Fatalf("Upstream.Mode = %q", cfg.Upstream.Mode)
+	}
+	if cfg.Upstream.BearerToken != "env-token" {
+		t.Fatalf("Upstream.BearerToken = %q", cfg.Upstream.BearerToken)
+	}
+}
+
 func TestLoadMigratesLegacyDataDirAliasForCustomConfigPath(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "app")
 	configPath := filepath.Join(baseDir, "config.json")
@@ -58,6 +75,45 @@ func TestLoadMigratesLegacyDataDirAliasForCustomConfigPath(t *testing.T) {
 	}
 	if cfg.DBPath != filepath.Join(baseDir, "state", "broxy.db") {
 		t.Fatalf("DBPath = %q", cfg.DBPath)
+	}
+}
+
+func TestLoadBearerTokenImpliesBearerMode(t *testing.T) {
+	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "")
+
+	baseDir := filepath.Join(t.TempDir(), "app")
+	configPath := filepath.Join(baseDir, "config.json")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	body := `{
+  "listen_addr": "127.0.0.1:8080",
+  "config_dir": "` + baseDir + `",
+  "state_dir": "` + filepath.Join(baseDir, "state") + `",
+  "db_path": "` + filepath.Join(baseDir, "state", "broxy.db") + `",
+  "pricing_path": "` + filepath.Join(baseDir, "pricing.json") + `",
+  "session_secret": "secret",
+  "upstream": {
+    "mode": "aws",
+    "region": "us-east-1",
+    "bearer_token": "file-token"
+  }
+}`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Upstream.Mode != UpstreamAuthBearer {
+		t.Fatalf("Upstream.Mode = %q", cfg.Upstream.Mode)
+	}
+	if cfg.Upstream.BearerToken != "file-token" {
+		t.Fatalf("Upstream.BearerToken = %q", cfg.Upstream.BearerToken)
 	}
 }
 

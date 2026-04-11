@@ -254,7 +254,6 @@ You can set bearer mode in config or through environment variables:
 
 ```bash
 export AWS_BEARER_TOKEN_BEDROCK=...
-export BEDROCK_PROXY_UPSTREAM_MODE=bearer
 export BEDROCK_PROXY_BEDROCK_REGION=us-east-1
 broxy service restart
 ```

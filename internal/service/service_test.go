@@ -69,3 +69,12 @@ func TestCapturedEnvironmentIncludesLogLevel(t *testing.T) {
 		t.Fatalf("CapturedEnvironment() missing BROXY_LOG_LEVEL, got %#v", env)
 	}
 }
+
+func TestCapturedEnvironmentIncludesBearerToken(t *testing.T) {
+	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "token")
+
+	env := CapturedEnvironment()
+	if env["AWS_BEARER_TOKEN_BEDROCK"] != "token" {
+		t.Fatalf("CapturedEnvironment() missing AWS_BEARER_TOKEN_BEDROCK, got %#v", env)
+	}
+}

@@ -185,6 +185,11 @@ func DefaultForPath(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	bearerToken := os.Getenv("AWS_BEARER_TOKEN_BEDROCK")
+	mode := UpstreamAuthAWS
+	if bearerToken != "" {
+		mode = UpstreamAuthBearer
+	}
 	return &Config{
 		ListenAddr:  "127.0.0.1:8080",
 		ConfigDir:   paths.ConfigDir,
@@ -193,10 +198,10 @@ func DefaultForPath(path string) (*Config, error) {
 		PricingPath: paths.PricingPath,
 		Env:         map[string]string{},
 		Upstream: UpstreamConfig{
-			Mode:        UpstreamAuthAWS,
+			Mode:        mode,
 			Region:      envDefault("AWS_REGION", envDefault("AWS_DEFAULT_REGION", "us-east-1")),
 			Profile:     os.Getenv("AWS_PROFILE"),
-			BearerToken: os.Getenv("AWS_BEARER_TOKEN_BEDROCK"),
+			BearerToken: bearerToken,
 		},
 	}, nil
 }
@@ -406,6 +411,9 @@ func applyDefaults(cfg *Config, path string) error {
 	}
 	if cfg.Upstream.Mode == "" {
 		cfg.Upstream.Mode = UpstreamAuthAWS
+	}
+	if cfg.Upstream.BearerToken != "" {
+		cfg.Upstream.Mode = UpstreamAuthBearer
 	}
 	if cfg.Upstream.Region == "" {
 		cfg.Upstream.Region = envDefault("AWS_REGION", envDefault("AWS_DEFAULT_REGION", "us-east-1"))
