@@ -173,6 +173,56 @@ Currently unsupported:
 
 Log into the admin UI at `http://127.0.0.1:8080/` with the generated `admin` password.
 
+## Using Broxy with Codex
+
+Codex can use Broxy as a custom OpenAI-compatible model provider. First create a Broxy client key:
+
+```bash
+broxy apikey create --name codex
+```
+
+Export that key in the shell where you start Codex:
+
+```bash
+export BROXY_API_KEY="YOUR_PROXY_KEY"
+```
+
+Then add a provider and profile to `~/.codex/config.toml`:
+
+```toml
+[profiles.broxy]
+model_provider = "broxy"
+model = "global.anthropic.claude-opus-4-6-v1"
+
+[model_providers.broxy]
+name = "Broxy"
+base_url = "http://127.0.0.1:8080/v1"
+env_key = "BROXY_API_KEY"
+requires_openai_auth = false
+supports_websockets = false
+```
+
+Make sure the configured model is available through Broxy. For Bedrock inference profiles, you can sync them into Broxy routes:
+
+```bash
+broxy models sync
+```
+
+Or add the route manually:
+
+```bash
+broxy models add \
+  --alias global.anthropic.claude-opus-4-6-v1 \
+  --model-id global.anthropic.claude-opus-4-6-v1 \
+  --region us-east-1
+```
+
+Start Codex with the profile:
+
+```bash
+codex --profile broxy
+```
+
 ## Bedrock authentication
 
 ### AWS credential chain
