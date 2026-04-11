@@ -647,6 +647,67 @@ func TestResponsesProxyToolCallJSONOutput(t *testing.T) {
 	}
 }
 
+func TestResponsesProxyMovesUserTextAfterToolResult(t *testing.T) {
+	input := []map[string]any{
+		{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "input_text",
+				"text": "Update the code",
+			}},
+		},
+		{
+			"type": "message",
+			"role": "assistant",
+			"content": []map[string]any{{
+				"type": "output_text",
+				"text": "I'll patch it.",
+			}},
+		},
+		{
+			"type":      "function_call",
+			"name":      "exec_command",
+			"call_id":   "tooluse_1",
+			"arguments": `{"cmd":"apply_patch"}`,
+		},
+		{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "input_text",
+				"text": "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.",
+			}},
+		},
+		{
+			"type":    "function_call_output",
+			"call_id": "tooluse_1",
+			"output":  "Success. Updated the files.",
+		},
+	}
+	payload, _ := json.Marshal(input)
+	normalized, err := normalizeResponseRequest(ResponseRequest{
+		Model: "claude-haiku-4-5",
+		Input: payload,
+	}, nil)
+	if err != nil {
+		t.Fatalf("normalizeResponseRequest() error = %v", err)
+	}
+	if len(normalized.Messages) != 3 {
+		t.Fatalf("unexpected messages = %#v", normalized.Messages)
+	}
+	blocks := normalized.Messages[2].Blocks
+	if len(blocks) != 2 {
+		t.Fatalf("unexpected user blocks = %#v", blocks)
+	}
+	if blocks[0].Type != "tool_result" || blocks[0].ToolUseID != "tooluse_1" {
+		t.Fatalf("tool result was not first: %#v", blocks)
+	}
+	if blocks[1].Type != "text" || !strings.Contains(blocks[1].Text, "apply_patch was requested") {
+		t.Fatalf("warning text was not preserved after tool result: %#v", blocks)
+	}
+}
+
 func TestResponsesProxyMovesLeadingAssistantContextIntoSystem(t *testing.T) {
 	tempDir := t.TempDir()
 	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))

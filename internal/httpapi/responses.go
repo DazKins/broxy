@@ -137,7 +137,66 @@ func normalizeBedrockConversation(messages []domain.BedrockChatMessage, system [
 	if messages[0].Role != "user" {
 		return nil, nil, fmt.Errorf("conversation must start with a user message")
 	}
+	messages = normalizeToolResultAdjacency(messages)
 	return messages, system, nil
+}
+
+func normalizeToolResultAdjacency(messages []domain.BedrockChatMessage) []domain.BedrockChatMessage {
+	for i := 0; i < len(messages)-1; i++ {
+		required := toolUseIDs(messages[i].Blocks)
+		if len(required) == 0 || messages[i+1].Role != "user" {
+			continue
+		}
+		reordered, changed := moveMatchingToolResultsFirst(messages[i+1].Blocks, required)
+		if !changed {
+			continue
+		}
+		messages[i+1].Blocks = reordered
+		messages[i+1].Content = blocksText(reordered)
+	}
+	return messages
+}
+
+func toolUseIDs(blocks []domain.BedrockContentBlock) map[string]struct{} {
+	ids := map[string]struct{}{}
+	for _, block := range blocks {
+		if block.Type == "tool_use" && block.ToolUseID != "" {
+			ids[block.ToolUseID] = struct{}{}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return ids
+}
+
+func moveMatchingToolResultsFirst(blocks []domain.BedrockContentBlock, required map[string]struct{}) ([]domain.BedrockContentBlock, bool) {
+	firstNonResult := -1
+	matchingResults := make([]domain.BedrockContentBlock, 0, len(required))
+	remaining := make([]domain.BedrockContentBlock, 0, len(blocks))
+	changed := false
+	for i, block := range blocks {
+		if block.Type == "tool_result" {
+			if _, ok := required[block.ToolUseID]; ok {
+				matchingResults = append(matchingResults, block)
+				if firstNonResult >= 0 {
+					changed = true
+				}
+				continue
+			}
+		}
+		if firstNonResult < 0 {
+			firstNonResult = i
+		}
+		remaining = append(remaining, block)
+	}
+	if len(matchingResults) == 0 || !changed {
+		return blocks, false
+	}
+	reordered := make([]domain.BedrockContentBlock, 0, len(blocks))
+	reordered = append(reordered, matchingResults...)
+	reordered = append(reordered, remaining...)
+	return reordered, true
 }
 
 func assistantMessageCanBecomeSystem(message domain.BedrockChatMessage) bool {
