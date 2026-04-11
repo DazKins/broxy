@@ -1,13 +1,73 @@
 package awsbedrock
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	brdocument "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	"github.com/personal/broxy/internal/config"
 	"github.com/personal/broxy/internal/domain"
+	"github.com/personal/broxy/internal/logging"
 )
+
+func TestNewWithLoggerLogsAWSEnvAuth(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	t.Setenv("AWS_PROFILE", "")
+
+	var logs bytes.Buffer
+	_, err := NewWithLogger(context.Background(), config.UpstreamConfig{
+		Mode:   config.UpstreamAuthAWS,
+		Region: "us-east-1",
+	}, logging.New("info", &logs))
+	if err != nil {
+		t.Fatalf("NewWithLogger() error = %v", err)
+	}
+
+	logText := logs.String()
+	if !strings.Contains(logText, "bedrock auth configured") {
+		t.Fatalf("missing auth log: %s", logText)
+	}
+	if !strings.Contains(logText, `auth_method="AWS access keys from environment"`) {
+		t.Fatalf("missing auth method: %s", logText)
+	}
+	if !strings.Contains(logText, "sdk_source=EnvConfigCredentials") {
+		t.Fatalf("missing SDK credential source: %s", logText)
+	}
+}
+
+func TestNewWithLoggerLogsBearerAuthWithoutTokenValue(t *testing.T) {
+	const token = "secret-bedrock-api-key"
+
+	var logs bytes.Buffer
+	_, err := NewWithLogger(context.Background(), config.UpstreamConfig{
+		Mode:        config.UpstreamAuthBearer,
+		Region:      "us-east-1",
+		BearerToken: token,
+	}, logging.New("info", &logs))
+	if err != nil {
+		t.Fatalf("NewWithLogger() error = %v", err)
+	}
+
+	logText := logs.String()
+	if !strings.Contains(logText, "bedrock auth configured") {
+		t.Fatalf("missing auth log: %s", logText)
+	}
+	if !strings.Contains(logText, `auth_method="Bedrock API key"`) {
+		t.Fatalf("missing bearer auth method: %s", logText)
+	}
+	if !strings.Contains(logText, "token_configured=true") {
+		t.Fatalf("missing token configured flag: %s", logText)
+	}
+	if strings.Contains(logText, token) {
+		t.Fatalf("log leaked bearer token: %s", logText)
+	}
+}
 
 func TestBuildConversePayloadIncludesExecCommandSchema(t *testing.T) {
 	req := domain.ConverseRequest{

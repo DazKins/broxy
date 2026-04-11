@@ -65,6 +65,9 @@ func NewWithLogger(ctx context.Context, upstream config.UpstreamConfig, logger *
 			return nil, fmt.Errorf("load aws config: %w", err)
 		}
 		client.aws = bedrockruntime.NewFromConfig(cfg)
+		client.logAWSAuth(ctx, cfg)
+	} else if upstream.Mode == config.UpstreamAuthBearer {
+		client.logBearerAuth()
 	}
 	return client, nil
 }
