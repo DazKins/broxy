@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	brdocument "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
@@ -26,6 +27,7 @@ type Client struct {
 	http     *http.Client
 	aws      *bedrockruntime.Client
 	logger   *slog.Logger
+	awsCfg   *aws.Config
 }
 
 type statusError struct {
@@ -65,11 +67,17 @@ func NewWithLogger(ctx context.Context, upstream config.UpstreamConfig, logger *
 			return nil, fmt.Errorf("load aws config: %w", err)
 		}
 		client.aws = bedrockruntime.NewFromConfig(cfg)
-		client.logAWSAuth(ctx, cfg)
-	} else if upstream.Mode == config.UpstreamAuthBearer {
-		client.logBearerAuth()
+		client.awsCfg = &cfg
 	}
 	return client, nil
+}
+
+func (c *Client) LogAuth(ctx context.Context) {
+	if c.upstream.Mode == config.UpstreamAuthAWS && c.awsCfg != nil {
+		c.logAWSAuth(ctx, *c.awsCfg)
+	} else if c.upstream.Mode == config.UpstreamAuthBearer {
+		c.logBearerAuth()
+	}
 }
 
 func (c *Client) Converse(ctx context.Context, req domain.ConverseRequest) (*domain.ConverseResponse, error) {

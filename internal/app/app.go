@@ -150,6 +150,7 @@ func newServeCommand(configPath *string) *cobra.Command {
 				return err
 			}
 			defer cleanup()
+			provider.LogAuth(cmd.Context())
 			server := &http.Server{
 				Addr:    cfg.ListenAddr,
 				Handler: httpapi.NewWithLogger(cfg, store, provider, Version, logger).Router(),

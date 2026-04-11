@@ -14,20 +14,22 @@ import (
 	"github.com/personal/broxy/internal/logging"
 )
 
-func TestNewWithLoggerLogsAWSEnvAuth(t *testing.T) {
+func TestLogAuthLogsAWSEnvAuth(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	t.Setenv("AWS_SESSION_TOKEN", "")
 	t.Setenv("AWS_PROFILE", "")
 
 	var logs bytes.Buffer
-	_, err := NewWithLogger(context.Background(), config.UpstreamConfig{
+	client, err := NewWithLogger(context.Background(), config.UpstreamConfig{
 		Mode:   config.UpstreamAuthAWS,
 		Region: "us-east-1",
 	}, logging.New("info", &logs))
 	if err != nil {
 		t.Fatalf("NewWithLogger() error = %v", err)
 	}
+
+	client.LogAuth(context.Background())
 
 	logText := logs.String()
 	if !strings.Contains(logText, "bedrock auth configured") {
@@ -41,11 +43,11 @@ func TestNewWithLoggerLogsAWSEnvAuth(t *testing.T) {
 	}
 }
 
-func TestNewWithLoggerLogsBearerAuthWithoutTokenValue(t *testing.T) {
+func TestLogAuthLogsBearerAuthWithoutTokenValue(t *testing.T) {
 	const token = "secret-bedrock-api-key"
 
 	var logs bytes.Buffer
-	_, err := NewWithLogger(context.Background(), config.UpstreamConfig{
+	client, err := NewWithLogger(context.Background(), config.UpstreamConfig{
 		Mode:        config.UpstreamAuthBearer,
 		Region:      "us-east-1",
 		BearerToken: token,
@@ -53,6 +55,8 @@ func TestNewWithLoggerLogsBearerAuthWithoutTokenValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWithLogger() error = %v", err)
 	}
+
+	client.LogAuth(context.Background())
 
 	logText := logs.String()
 	if !strings.Contains(logText, "bedrock auth configured") {
