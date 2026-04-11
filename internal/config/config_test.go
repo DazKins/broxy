@@ -61,6 +61,101 @@ func TestLoadMigratesLegacyDataDirAliasForCustomConfigPath(t *testing.T) {
 	}
 }
 
+func TestLoadEnvBlockOverridesKnownEnvironmentSettings(t *testing.T) {
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "")
+
+	baseDir := filepath.Join(t.TempDir(), "app")
+	configPath := filepath.Join(baseDir, "config.json")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	body := `{
+  "listen_addr": "127.0.0.1:8080",
+  "config_dir": "` + baseDir + `",
+  "state_dir": "` + filepath.Join(baseDir, "state") + `",
+  "db_path": "` + filepath.Join(baseDir, "state", "broxy.db") + `",
+  "pricing_path": "` + filepath.Join(baseDir, "pricing.json") + `",
+  "session_secret": "secret",
+  "upstream": {
+    "mode": "aws",
+    "region": "us-east-1"
+  },
+  "env": {
+    "AWS_PROFILE": "sso-prod",
+    "AWS_REGION": "eu-west-1",
+    "AWS_BEARER_TOKEN_BEDROCK": "token"
+  }
+}`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Env["AWS_PROFILE"] != "sso-prod" {
+		t.Fatalf("Env[AWS_PROFILE] = %q", cfg.Env["AWS_PROFILE"])
+	}
+	if cfg.Upstream.Region != "eu-west-1" {
+		t.Fatalf("Upstream.Region = %q", cfg.Upstream.Region)
+	}
+	if cfg.Upstream.Profile != "sso-prod" {
+		t.Fatalf("Upstream.Profile = %q", cfg.Upstream.Profile)
+	}
+	if cfg.Upstream.Mode != UpstreamAuthBearer {
+		t.Fatalf("Upstream.Mode = %q", cfg.Upstream.Mode)
+	}
+	if cfg.Upstream.BearerToken != "token" {
+		t.Fatalf("Upstream.BearerToken = %q", cfg.Upstream.BearerToken)
+	}
+}
+
+func TestApplyEnvSetsArbitraryValues(t *testing.T) {
+	t.Setenv("BROXY_TEST_ENV", "original")
+
+	if err := ApplyEnv(map[string]string{
+		"BROXY_TEST_ENV":       "from-config",
+		"BROXY_TEST_EMPTY_ENV": "",
+	}); err != nil {
+		t.Fatalf("ApplyEnv() error = %v", err)
+	}
+
+	if got := os.Getenv("BROXY_TEST_ENV"); got != "from-config" {
+		t.Fatalf("BROXY_TEST_ENV = %q", got)
+	}
+	if got, ok := os.LookupEnv("BROXY_TEST_EMPTY_ENV"); !ok || got != "" {
+		t.Fatalf("BROXY_TEST_EMPTY_ENV = %q, ok=%t", got, ok)
+	}
+}
+
+func TestLoadRejectsInvalidEnvKey(t *testing.T) {
+	baseDir := filepath.Join(t.TempDir(), "app")
+	configPath := filepath.Join(baseDir, "config.json")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	body := `{
+  "listen_addr": "127.0.0.1:8080",
+  "env": {
+    "BAD=KEY": "value"
+  }
+}`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := Load(configPath); err == nil {
+		t.Fatalf("Load() error = nil, want invalid env key")
+	}
+}
+
 func TestMigrateLegacyStateMovesDatabase(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "app")
 	configPath := filepath.Join(baseDir, "config.json")

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	cfgpkg "github.com/personal/broxy/internal/config"
 )
 
 func TestInitCommandJSON(t *testing.T) {
@@ -75,5 +77,37 @@ func TestServiceInstallDryRun(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "serve") || !strings.Contains(stdout.String(), "--config") {
 		t.Fatalf("dry-run output missing ExecStart/ProgramArguments: %s", stdout.String())
+	}
+}
+
+func TestServiceInstallDryRunIncludesConfigEnv(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "broxy", "config.json")
+	cfg, err := cfgpkg.DefaultForPath(configPath)
+	if err != nil {
+		t.Fatalf("DefaultForPath() error = %v", err)
+	}
+	cfg.Env = map[string]string{
+		"HTTP_PROXY":      "http://127.0.0.1:7890",
+		"BROXY_LOG_LEVEL": "debug",
+	}
+	if err := cfgpkg.Save(configPath, cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	cmd := NewRootCommand()
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
+	cmd.SetArgs([]string{"--config", configPath, "service", "install", "--dry-run"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "HTTP_PROXY") || !strings.Contains(stdout.String(), "http://127.0.0.1:7890") {
+		t.Fatalf("dry-run output missing config env: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "BROXY_LOG_LEVEL") || !strings.Contains(stdout.String(), "debug") {
+		t.Fatalf("dry-run output missing config log env: %s", stdout.String())
 	}
 }

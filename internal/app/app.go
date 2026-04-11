@@ -724,6 +724,9 @@ func bootstrap(ctx context.Context, configPath string) (*cfgpkg.Config, *db.Stor
 	if err := cfgpkg.MigrateLegacyState(path, cfg); err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
+	if err := cfgpkg.ApplyEnv(cfg.Env); err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
 	store, err := db.Open(cfg.DBPath)
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
@@ -814,7 +817,11 @@ func serviceDefinition(configOverride string, requireConfig bool) (*service.Defi
 	if err != nil {
 		return nil, nil, fmt.Errorf("locate current executable: %w", err)
 	}
-	def, err := service.NewDefinition(target, cfg, path, executable, service.CapturedEnvironment())
+	env := service.CapturedEnvironment()
+	for key, value := range cfg.Env {
+		env[key] = value
+	}
+	def, err := service.NewDefinition(target, cfg, path, executable, env)
 	if err != nil {
 		return nil, nil, err
 	}

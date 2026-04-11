@@ -26,14 +26,15 @@ type UpstreamConfig struct {
 }
 
 type Config struct {
-	ListenAddr    string         `json:"listen_addr"`
-	ConfigDir     string         `json:"config_dir"`
-	StateDir      string         `json:"state_dir"`
-	DataDir       string         `json:"-"`
-	DBPath        string         `json:"db_path"`
-	SessionSecret string         `json:"session_secret"`
-	PricingPath   string         `json:"pricing_path"`
-	Upstream      UpstreamConfig `json:"upstream"`
+	ListenAddr    string            `json:"listen_addr"`
+	ConfigDir     string            `json:"config_dir"`
+	StateDir      string            `json:"state_dir"`
+	DataDir       string            `json:"-"`
+	DBPath        string            `json:"db_path"`
+	SessionSecret string            `json:"session_secret"`
+	PricingPath   string            `json:"pricing_path"`
+	Upstream      UpstreamConfig    `json:"upstream"`
+	Env           map[string]string `json:"env"`
 }
 
 type Paths struct {
@@ -46,14 +47,15 @@ type Paths struct {
 }
 
 type fileConfig struct {
-	ListenAddr    string         `json:"listen_addr"`
-	ConfigDir     string         `json:"config_dir"`
-	StateDir      string         `json:"state_dir,omitempty"`
-	DataDir       string         `json:"data_dir,omitempty"`
-	DBPath        string         `json:"db_path"`
-	SessionSecret string         `json:"session_secret"`
-	PricingPath   string         `json:"pricing_path"`
-	Upstream      UpstreamConfig `json:"upstream"`
+	ListenAddr    string            `json:"listen_addr"`
+	ConfigDir     string            `json:"config_dir"`
+	StateDir      string            `json:"state_dir,omitempty"`
+	DataDir       string            `json:"data_dir,omitempty"`
+	DBPath        string            `json:"db_path"`
+	SessionSecret string            `json:"session_secret"`
+	PricingPath   string            `json:"pricing_path"`
+	Upstream      UpstreamConfig    `json:"upstream"`
+	Env           map[string]string `json:"env"`
 }
 
 func DefaultPaths() (Paths, error) {
@@ -189,6 +191,7 @@ func DefaultForPath(path string) (*Config, error) {
 		StateDir:    paths.StateDir,
 		DBPath:      paths.DBPath,
 		PricingPath: paths.PricingPath,
+		Env:         map[string]string{},
 		Upstream: UpstreamConfig{
 			Mode:        UpstreamAuthAWS,
 			Region:      envDefault("AWS_REGION", envDefault("AWS_DEFAULT_REGION", "us-east-1")),
@@ -224,6 +227,7 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	overrideFromEnv(cfg)
+	overrideFromEnvMap(cfg, cfg.Env)
 	return cfg, nil
 }
 
@@ -243,6 +247,7 @@ func Save(path string, cfg *Config) error {
 		SessionSecret: cfg.SessionSecret,
 		PricingPath:   cfg.PricingPath,
 		Upstream:      cfg.Upstream,
+		Env:           cloneEnv(cfg.Env),
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
@@ -366,6 +371,9 @@ func applyFileConfig(cfg *Config, path string, raw fileConfig) error {
 		cfg.PricingPath = raw.PricingPath
 	}
 	cfg.Upstream = mergeUpstream(cfg.Upstream, raw.Upstream)
+	if raw.Env != nil {
+		cfg.Env = cloneEnv(raw.Env)
+	}
 
 	return applyDefaults(cfg, path)
 }
@@ -389,6 +397,12 @@ func applyDefaults(cfg *Config, path string) error {
 	}
 	if cfg.PricingPath == "" {
 		cfg.PricingPath = filepath.Join(cfg.ConfigDir, "pricing.json")
+	}
+	if cfg.Env == nil {
+		cfg.Env = map[string]string{}
+	}
+	if err := validateEnv(cfg.Env); err != nil {
+		return err
 	}
 	if cfg.Upstream.Mode == "" {
 		cfg.Upstream.Mode = UpstreamAuthAWS
@@ -417,6 +431,65 @@ func mergeUpstream(defaults, overrides UpstreamConfig) UpstreamConfig {
 		out.EndpointOverride = overrides.EndpointOverride
 	}
 	return out
+}
+
+func ApplyEnv(env map[string]string) error {
+	if err := validateEnv(env); err != nil {
+		return err
+	}
+	for key, value := range env {
+		if err := os.Setenv(key, value); err != nil {
+			return fmt.Errorf("set env %q: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func cloneEnv(env map[string]string) map[string]string {
+	if env == nil {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(env))
+	for key, value := range env {
+		out[key] = value
+	}
+	return out
+}
+
+func validateEnv(env map[string]string) error {
+	for key, value := range env {
+		if key == "" {
+			return fmt.Errorf("env contains empty key")
+		}
+		if containsNUL(key) {
+			return fmt.Errorf("env key %q contains NUL byte", key)
+		}
+		if containsNUL(value) {
+			return fmt.Errorf("env value for %q contains NUL byte", key)
+		}
+		if containsEqual(key) {
+			return fmt.Errorf("env key %q is invalid", key)
+		}
+	}
+	return nil
+}
+
+func containsNUL(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func containsEqual(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] == '=' {
+			return true
+		}
+	}
+	return false
 }
 
 func moveFile(src, dst string) error {
@@ -466,6 +539,31 @@ func overrideFromEnv(cfg *Config) {
 		cfg.Upstream.Profile = v
 	}
 	if v := os.Getenv("AWS_BEARER_TOKEN_BEDROCK"); v != "" {
+		cfg.Upstream.BearerToken = v
+		cfg.Upstream.Mode = UpstreamAuthBearer
+	}
+}
+
+func overrideFromEnvMap(cfg *Config, env map[string]string) {
+	if v := env["BEDROCK_PROXY_LISTEN_ADDR"]; v != "" {
+		cfg.ListenAddr = v
+	}
+	if v := env["BEDROCK_PROXY_UPSTREAM_MODE"]; v != "" {
+		cfg.Upstream.Mode = UpstreamAuthMode(v)
+	}
+	if v := env["AWS_DEFAULT_REGION"]; v != "" {
+		cfg.Upstream.Region = v
+	}
+	if v := env["AWS_REGION"]; v != "" {
+		cfg.Upstream.Region = v
+	}
+	if v := env["BEDROCK_PROXY_BEDROCK_REGION"]; v != "" {
+		cfg.Upstream.Region = v
+	}
+	if v := env["AWS_PROFILE"]; v != "" {
+		cfg.Upstream.Profile = v
+	}
+	if v := env["AWS_BEARER_TOKEN_BEDROCK"]; v != "" {
 		cfg.Upstream.BearerToken = v
 		cfg.Upstream.Mode = UpstreamAuthBearer
 	}

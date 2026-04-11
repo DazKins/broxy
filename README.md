@@ -93,7 +93,19 @@ broxy service uninstall
 
 On Linux, the service runs as a user service and starts automatically after that user logs in. On macOS, it runs as a LaunchAgent for the logged-in user.
 
-Set `BROXY_LOG_LEVEL=debug` before starting or restarting the service to enable debug logging, including raw upstream Responses API payloads in the service logs.
+Add environment variables that the service should always receive to the config file's `env` block, then restart the service:
+
+```json
+{
+  "env": {
+    "BROXY_LOG_LEVEL": "debug",
+    "HTTPS_PROXY": "http://127.0.0.1:7890",
+    "NO_PROXY": "127.0.0.1,localhost"
+  }
+}
+```
+
+`BROXY_LOG_LEVEL=debug` enables debug logging, including raw upstream Responses API payloads in the service logs. Re-run `broxy service install` after changing `env` if you want the native systemd or launchd service definition to show the updated values too.
 
 ## First-time setup without the installer
 
