@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	brdocument "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
+	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/personal/broxy/internal/domain"
 )
 
@@ -67,5 +69,89 @@ func TestBuildConversePayloadIncludesExecCommandSchema(t *testing.T) {
 	}
 	if toolChoice, ok := toolConfig["toolChoice"].(map[string]any); !ok || toolChoice["auto"] == nil {
 		t.Fatalf("toolChoice missing auto: %#v", toolConfig["toolChoice"])
+	}
+}
+
+func TestFromSDKContentBlockMarshalsToolInputDocument(t *testing.T) {
+	block, err := fromSDKContentBlock(&brtypes.ContentBlockMemberToolUse{
+		Value: brtypes.ToolUseBlock{
+			ToolUseId: ptrString("tooluse_1"),
+			Name:      ptrString("exec_command"),
+			Input: brdocument.NewLazyDocument(map[string]any{
+				"cmd": "pwd",
+			}),
+		},
+	})
+	if err != nil {
+		t.Fatalf("fromSDKContentBlock() error = %v", err)
+	}
+	if block.Type != "tool_use" {
+		t.Fatalf("type = %q", block.Type)
+	}
+	var input struct {
+		Cmd string `json:"cmd"`
+	}
+	if err := json.Unmarshal(block.ToolInput, &input); err != nil {
+		t.Fatalf("json.Unmarshal(tool input) error = %v; input=%s", err, block.ToolInput)
+	}
+	if input.Cmd != "pwd" {
+		t.Fatalf("cmd = %q, input=%s", input.Cmd, block.ToolInput)
+	}
+}
+
+func TestJsonToolConfigAddsMissingAdditionalPropertiesFalse(t *testing.T) {
+	toolConfig, err := jsonToolConfig([]domain.ToolDefinition{{
+		Name: "mcp__codex_apps__github_add_comment_to_issue",
+		Parameters: []byte(`{
+			"type": "object",
+			"properties": {
+				"comment": {"type": "string"},
+				"metadata": {
+					"type": "object",
+					"properties": {
+						"source": {"type": "string"}
+					}
+				}
+			},
+			"required": ["comment"]
+		}`),
+	}}, nil)
+	if err != nil {
+		t.Fatalf("jsonToolConfig() error = %v", err)
+	}
+	schema := toolConfig["tools"].([]map[string]any)[0]["toolSpec"].(map[string]any)["inputSchema"].(map[string]any)["json"].(map[string]any)
+	if schema["additionalProperties"] != false {
+		t.Fatalf("top-level additionalProperties = %#v", schema["additionalProperties"])
+	}
+	metadata := schema["properties"].(map[string]any)["metadata"].(map[string]any)
+	if metadata["additionalProperties"] != false {
+		t.Fatalf("nested additionalProperties = %#v", metadata["additionalProperties"])
+	}
+}
+
+func TestNormalizeToolSchemaPreservesExplicitAdditionalProperties(t *testing.T) {
+	schema, err := decodeToolSchemaValue([]byte(`{
+		"type": "object",
+		"additionalProperties": true,
+		"properties": {
+			"closed": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"name": {"type": "string"}
+				}
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("decodeToolSchemaValue() error = %v", err)
+	}
+	root := schema.(map[string]any)
+	if root["additionalProperties"] != true {
+		t.Fatalf("root additionalProperties = %#v", root["additionalProperties"])
+	}
+	closed := root["properties"].(map[string]any)["closed"].(map[string]any)
+	if closed["additionalProperties"] != false {
+		t.Fatalf("closed additionalProperties = %#v", closed["additionalProperties"])
 	}
 }

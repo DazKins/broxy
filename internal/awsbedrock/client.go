@@ -315,7 +315,7 @@ func sdkContentBlock(block domain.BedrockContentBlock) (brtypes.ContentBlock, er
 func sdkToolConfig(tools []domain.ToolDefinition, choice *domain.ToolChoice) (*brtypes.ToolConfiguration, error) {
 	items := make([]brtypes.Tool, 0, len(tools))
 	for _, tool := range tools {
-		schemaValue, err := decodeLazyDocument(tool.Parameters)
+		schemaValue, err := decodeToolSchemaDocument(tool.Parameters)
 		if err != nil {
 			return nil, fmt.Errorf("decode parameters for %s: %w", tool.Name, err)
 		}
@@ -367,7 +367,7 @@ func fromSDKContentBlock(block brtypes.ContentBlock) (domain.BedrockContentBlock
 	case *brtypes.ContentBlockMemberText:
 		return domain.BedrockContentBlock{Type: "text", Text: v.Value}, nil
 	case *brtypes.ContentBlockMemberToolUse:
-		input, err := json.Marshal(v.Value.Input)
+		input, err := marshalDocument(v.Value.Input)
 		if err != nil {
 			return domain.BedrockContentBlock{}, fmt.Errorf("marshal tool input: %w", err)
 		}
@@ -384,7 +384,7 @@ func fromSDKContentBlock(block brtypes.ContentBlock) (domain.BedrockContentBlock
 			case *brtypes.ToolResultContentBlockMemberText:
 				content = append(content, domain.ToolResultContent{Type: "text", Text: part.Value})
 			case *brtypes.ToolResultContentBlockMemberJson:
-				body, err := json.Marshal(part.Value)
+				body, err := marshalDocument(part.Value)
 				if err != nil {
 					return domain.BedrockContentBlock{}, fmt.Errorf("marshal tool result json: %w", err)
 				}
@@ -524,8 +524,8 @@ func transformJSONMessages(messages []domain.BedrockChatMessage) []map[string]an
 func jsonToolConfig(tools []domain.ToolDefinition, choice *domain.ToolChoice) (map[string]any, error) {
 	items := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
-		var params any
-		if err := json.Unmarshal(nonEmptyJSON(tool.Parameters, []byte(`{"type":"object","properties":{}}`)), &params); err != nil {
+		params, err := decodeToolSchemaValue(tool.Parameters)
+		if err != nil {
 			return nil, fmt.Errorf("decode parameters for %s: %w", tool.Name, err)
 		}
 		spec := map[string]any{
@@ -594,6 +594,85 @@ func decodeLazyDocument(raw []byte) (brdocument.Interface, error) {
 		return nil, err
 	}
 	return brdocument.NewLazyDocument(value), nil
+}
+
+func decodeToolSchemaDocument(raw []byte) (brdocument.Interface, error) {
+	value, err := decodeToolSchemaValue(raw)
+	if err != nil {
+		return nil, err
+	}
+	return brdocument.NewLazyDocument(value), nil
+}
+
+func decodeToolSchemaValue(raw []byte) (any, error) {
+	var value any
+	if err := json.Unmarshal(nonEmptyJSON(raw, []byte(`{"type":"object","properties":{}}`)), &value); err != nil {
+		return nil, err
+	}
+	normalizeToolSchema(value)
+	return value, nil
+}
+
+func normalizeToolSchema(value any) {
+	switch schema := value.(type) {
+	case map[string]any:
+		if schemaHasObjectType(schema) {
+			if _, ok := schema["additionalProperties"]; !ok {
+				schema["additionalProperties"] = false
+			}
+		}
+		for _, key := range []string{"properties", "$defs", "definitions", "dependentSchemas"} {
+			if children, ok := schema[key].(map[string]any); ok {
+				for _, child := range children {
+					normalizeToolSchema(child)
+				}
+			}
+		}
+		for _, key := range []string{"items", "additionalItems", "contains", "propertyNames", "if", "then", "else", "not"} {
+			if child, ok := schema[key]; ok {
+				normalizeToolSchema(child)
+			}
+		}
+		for _, key := range []string{"anyOf", "oneOf", "allOf", "prefixItems"} {
+			if children, ok := schema[key].([]any); ok {
+				for _, child := range children {
+					normalizeToolSchema(child)
+				}
+			}
+		}
+	case []any:
+		for _, item := range schema {
+			normalizeToolSchema(item)
+		}
+	}
+}
+
+func schemaHasObjectType(schema map[string]any) bool {
+	switch value := schema["type"].(type) {
+	case string:
+		return value == "object"
+	case []any:
+		for _, item := range value {
+			if item == "object" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func marshalDocument(value brdocument.Interface) ([]byte, error) {
+	if value == nil {
+		return []byte(`null`), nil
+	}
+	body, err := value.MarshalSmithyDocument()
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 {
+		return []byte(`null`), nil
+	}
+	return body, nil
 }
 
 func ptrString(value string) *string {
