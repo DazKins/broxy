@@ -206,6 +206,14 @@ td {
   vertical-align: top;
 }
 
+.log-preview {
+  max-width: 260px;
+  color: var(--muted);
+  font-family: "SF Mono", "Monaco", monospace;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
 th {
   color: var(--muted);
   font-size: 0.85rem;
@@ -273,6 +281,11 @@ input {
   border-color: rgba(255, 122, 122, 0.3);
 }
 
+.compact-button {
+  padding: 8px 12px;
+  white-space: nowrap;
+}
+
 .callout,
 .flash,
 .code-panel {
@@ -304,6 +317,82 @@ input {
   border: 1px solid var(--line);
   white-space: pre-wrap;
   overflow: auto;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(3, 8, 9, 0.72);
+}
+
+.modal-panel {
+  width: min(1120px, 100%);
+  max-height: min(860px, calc(100vh - 48px));
+  display: grid;
+  grid-template-rows: auto 1fr;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+}
+
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.modal-head h3 {
+  margin: 0;
+}
+
+.modal-body {
+  overflow: auto;
+  padding: 20px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.detail-item {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(8, 18, 19, 0.4);
+}
+
+.detail-item strong {
+  display: block;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.log-sections {
+  display: grid;
+  gap: 16px;
+}
+
+.log-section h4 {
+  margin: 0 0 8px;
+}
+
+.log-content {
+  max-height: 420px;
+  margin: 0;
+  font-family: "SF Mono", "Monaco", monospace;
+  font-size: 0.9rem;
 }
 
 .hidden {

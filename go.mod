@@ -3,8 +3,8 @@ module github.com/personal/broxy
 go 1.25.4
 
 require (
+	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.14
-	github.com/aws/aws-sdk-go-v2/service/bedrock v1.59.0
 	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.50.4
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/google/uuid v1.6.0
@@ -16,7 +16,6 @@ require (
 )
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.41.5 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.8 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.14 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.21 // indirect

@@ -1,6 +1,7 @@
 const state = {
   currentView: "dashboard",
   authed: false,
+  requests: [],
 };
 
 const views = ["dashboard", "requests", "usage", "keys", "models", "settings"];
@@ -46,6 +47,13 @@ function bindActions() {
   document.getElementById("logout-btn").addEventListener("click", async () => {
     await api("/api/admin/auth/logout", { method: "POST" });
     location.reload();
+  });
+  document.getElementById("request-modal-close").addEventListener("click", closeRequestModal);
+  document.getElementById("request-modal").addEventListener("click", (event) => {
+    if (event.target.id === "request-modal") closeRequestModal();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeRequestModal();
   });
 }
 
@@ -178,25 +186,35 @@ async function renderDashboard() {
 
 async function renderRequests() {
   const response = await api("/api/admin/requests?limit=50");
-  const rows = response.items
-    .map(
-      (item) => `
+  state.requests = response.items || [];
+  const rows = state.requests
+    .map((item, index) => {
+      const inputPreview = item.content_logged ? loggedPreview(item.request_json) : "<span class='muted'>metadata only</span>";
+      const outputPreview = item.content_logged ? loggedPreview(item.response_text || item.error_text) : "<span class='muted'>metadata only</span>";
+      return `
       <tr>
         <td>${formatDateTime(item.started_at)}</td>
         <td>${escapeHTML(item.api_key_name || item.api_key_id)}</td>
         <td>${escapeHTML(item.model)}</td>
         <td>${item.status_code}</td>
-        <td>${item.total_tokens}</td>
+        <td>${formatNumber(item.input_tokens)}</td>
+        <td>${formatNumber(item.output_tokens)}</td>
+        <td>${formatNumber(item.total_tokens)}</td>
         <td>${formatCurrency(item.estimated_cost_usd)}</td>
         <td>${item.latency_ms} ms</td>
-        <td>${item.content_logged ? escapeHTML(shorten(item.response_text || item.request_json || "", 96)) : "<span class='muted'>metadata only</span>"}</td>
-      </tr>`,
-    )
+        <td class="log-preview">${inputPreview}</td>
+        <td class="log-preview">${outputPreview}</td>
+        <td><button class="ghost-button compact-button" type="button" data-request-index="${index}">Details</button></td>
+      </tr>`;
+    })
     .join("");
   document.getElementById("requests-table").innerHTML = tableHTML(
-    ["Time", "Key", "Model", "Status", "Tokens", "Cost", "Latency", "Log sample"],
+    ["Time", "Key", "Model", "Status", "Input tokens", "Output tokens", "Total tokens", "Cost", "Latency", "Input preview", "Output preview", ""],
     rows,
   );
+  document.querySelectorAll("[data-request-index]").forEach((button) => {
+    button.addEventListener("click", () => openRequestModal(Number(button.dataset.requestIndex)));
+  });
 }
 
 async function renderUsage() {
@@ -320,6 +338,10 @@ function formatCurrency(value) {
   return number === 0 ? "$0.00" : `$${number.toFixed(6)}`;
 }
 
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString();
+}
+
 function formatDateTime(value) {
   if (!value) return "Never";
   return new Date(value).toLocaleString();
@@ -327,7 +349,72 @@ function formatDateTime(value) {
 
 function shorten(value, max) {
   if (value.length <= max) return escapeHTML(value);
-  return `${escapeHTML(value.slice(0, max))}…`;
+  return `${escapeHTML(value.slice(0, max))}...`;
+}
+
+function loggedPreview(value) {
+  if (!value) return "<span class='muted'>empty</span>";
+  return shorten(value, 96);
+}
+
+function openRequestModal(index) {
+  const item = state.requests[index];
+  if (!item) return;
+  document.getElementById("request-modal-title").textContent = `${item.method} ${item.path}`;
+  document.getElementById("request-modal-body").innerHTML = `
+    <div class="detail-grid">
+      ${detailItem("Time", formatDateTime(item.started_at))}
+      ${detailItem("Key", item.api_key_name || item.api_key_id)}
+      ${detailItem("Model", item.model)}
+      ${detailItem("Bedrock model", item.bedrock_model_id)}
+      ${detailItem("Region", item.region)}
+      ${detailItem("Status", item.status_code)}
+      ${detailItem("Latency", `${item.latency_ms} ms`)}
+      ${detailItem("Stream", item.stream ? "yes" : "no")}
+      ${detailItem("Input tokens", formatNumber(item.input_tokens))}
+      ${detailItem("Output tokens", formatNumber(item.output_tokens))}
+      ${detailItem("Total tokens", formatNumber(item.total_tokens))}
+      ${detailItem("Cost", formatCurrency(item.estimated_cost_usd))}
+      ${detailItem("Upstream request ID", item.upstream_request_id || "none")}
+    </div>
+    <div class="log-sections">
+      ${logSection("Input", item.content_logged ? prettyContent(item.request_json) : "Content logging was disabled for this client key.")}
+      ${logSection("Output", item.content_logged ? prettyContent(item.response_text) : "Content logging was disabled for this client key.")}
+      ${item.error_text ? logSection("Error", item.error_text) : ""}
+    </div>
+  `;
+  document.getElementById("request-modal").classList.remove("hidden");
+}
+
+function closeRequestModal() {
+  document.getElementById("request-modal").classList.add("hidden");
+}
+
+function detailItem(label, value) {
+  return `
+    <div class="detail-item">
+      <span class="eyebrow">${escapeHTML(label)}</span>
+      <strong>${escapeHTML(value)}</strong>
+    </div>
+  `;
+}
+
+function logSection(title, value) {
+  return `
+    <section class="log-section">
+      <h4>${escapeHTML(title)}</h4>
+      <pre class="code-panel log-content">${escapeHTML(value || "empty")}</pre>
+    </section>
+  `;
+}
+
+function prettyContent(value) {
+  if (!value) return "";
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
 }
 
 function titleCase(value) {

@@ -12,8 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/bedrock"
 	"github.com/spf13/cobra"
 
 	"github.com/personal/broxy/internal/awsbedrock"
@@ -651,52 +649,6 @@ func newModelsCommand(configPath *string) *cobra.Command {
 			for _, item := range items {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\tenabled=%t\n", item.Alias, item.BedrockModelID, item.Region, item.Enabled)
 			}
-			return nil
-		},
-	})
-	cmd.AddCommand(&cobra.Command{
-		Use:   "sync",
-		Short: "Discover Bedrock inference profiles and upsert them as aliases",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
-			if err != nil {
-				return err
-			}
-			defer cleanup()
-			if cfg.Upstream.Mode != cfgpkg.UpstreamAuthAWS {
-				return fmt.Errorf("models sync requires AWS credential mode")
-			}
-			loadOptions := []func(*config.LoadOptions) error{
-				config.WithRegion(cfg.Upstream.Region),
-			}
-			if cfg.Upstream.Profile != "" {
-				loadOptions = append(loadOptions, config.WithSharedConfigProfile(cfg.Upstream.Profile))
-			}
-			awsCfg, err := config.LoadDefaultConfig(cmd.Context(), loadOptions...)
-			if err != nil {
-				return err
-			}
-			client := bedrock.NewFromConfig(awsCfg)
-			out, err := client.ListInferenceProfiles(cmd.Context(), &bedrock.ListInferenceProfilesInput{})
-			if err != nil {
-				return err
-			}
-			for _, summary := range out.InferenceProfileSummaries {
-				profileID := awsString(summary.InferenceProfileId)
-				if profileID == "" {
-					continue
-				}
-				_, err := store.UpsertModelRoute(cmd.Context(), domain.ModelRoute{
-					Alias:          profileID,
-					BedrockModelID: profileID,
-					Region:         cfg.Upstream.Region,
-					Enabled:        true,
-				})
-				if err != nil {
-					return err
-				}
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Synced %d inference profiles into routes\n", len(out.InferenceProfileSummaries))
 			return nil
 		},
 	})
