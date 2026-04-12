@@ -172,6 +172,7 @@ The Responses API support is currently text-oriented:
 - function tool definitions via `tools`
 - model-emitted function calls
 - text or JSON `function_call_output` follow-up inputs
+- `item_reference` follow-ups used by Responses clients that store prior output items
 - `previous_response_id` chaining against in-memory server state
 - SSE streaming for text output
 - websocket streaming for text output and function-call argument deltas
@@ -204,7 +205,7 @@ Then add a provider and profile to `~/.codex/config.toml`:
 ```toml
 [profiles.broxy]
 model_provider = "broxy"
-model = "global.anthropic.claude-opus-4-6-v1"
+model = "claude-opus-4.6"
 
 [model_providers.broxy]
 name = "Broxy"
@@ -224,7 +225,7 @@ Or add the route manually:
 
 ```bash
 broxy models add \
-  --alias global.anthropic.claude-opus-4-6-v1 \
+  --alias claude-opus-4.6 \
   --model-id global.anthropic.claude-opus-4-6-v1 \
   --region us-east-1
 ```
@@ -234,6 +235,67 @@ Start Codex with the profile:
 ```bash
 codex --profile broxy
 ```
+
+## Using Broxy with opencode
+
+opencode can use Broxy as a custom OpenAI provider through Broxy's Responses-compatible endpoint. First create a Broxy client key:
+
+```bash
+broxy apikey create --name opencode
+```
+
+Export that key in the shell where you start opencode:
+
+```bash
+export BROXY_API_KEY="YOUR_PROXY_KEY"
+```
+
+Then create or update `~/.config/opencode/opencode.json` or a project-level `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "broxy/claude-opus-4.6",
+  "small_model": "broxy/claude-haiku-4.5",
+  "provider": {
+    "broxy": {
+      "npm": "@ai-sdk/openai",
+      "name": "Broxy",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "apiKey": "{env:BROXY_API_KEY}"
+      },
+      "models": {
+        "claude-opus-4.6": {
+          "name": "Claude Opus 4.6 via Broxy",
+          "limit": {
+            "context": 200000,
+            "output": 32000
+          }
+        },
+        "claude-haiku-4.5": {
+          "name": "Claude Haiku 4.5 via Broxy",
+          "limit": {
+            "context": 200000,
+            "output": 32000
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Make sure each configured opencode model ID is also available as a Broxy model alias. For example:
+
+```bash
+broxy models add \
+  --alias claude-opus-4.6 \
+  --model-id global.anthropic.claude-opus-4-6-v1 \
+  --region us-east-1
+```
+
+Use `@ai-sdk/openai` for this provider so opencode talks to Broxy through `/v1/responses`. Broxy's `/v1/chat/completions` endpoint is suitable for plain chat clients, but the Responses endpoint is the right path for opencode because it supports function tool calls and tool result follow-ups.
 
 ## Using Broxy with Claude Code
 
@@ -248,7 +310,7 @@ Export that key in the shell where you start Claude Code:
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
 export ANTHROPIC_AUTH_TOKEN="YOUR_PROXY_KEY"
-export ANTHROPIC_MODEL="global.anthropic.claude-opus-4-6-v1"
+export ANTHROPIC_MODEL="claude-opus-4.6"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="us.anthropic.claude-haiku-4-5-20251001-v1:0"
 export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
 ```
@@ -257,7 +319,7 @@ Make sure each configured model is available as a Broxy model alias. For example
 
 ```bash
 broxy models add \
-  --alias global.anthropic.claude-opus-4-6-v1 \
+  --alias claude-opus-4.6 \
   --model-id global.anthropic.claude-opus-4-6-v1 \
   --region us-east-1
 ```

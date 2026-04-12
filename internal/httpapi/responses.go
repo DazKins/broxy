@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,6 +32,11 @@ type storedResponse struct {
 	Response map[string]any
 	System   []string
 	Messages []domain.BedrockChatMessage
+	ItemIDs  map[string]struct{}
+}
+
+type storedResponseItem struct {
+	Messages []domain.BedrockChatMessage
 }
 
 type normalizedResponseRequest struct {
@@ -42,7 +48,33 @@ type normalizedResponseRequest struct {
 	ToolChoiceValue any
 }
 
+type itemReferenceResolver func(id string) (storedResponseItem, bool)
+
 func normalizeResponseRequest(req ResponseRequest, previous *storedResponse) (*normalizedResponseRequest, error) {
+	return normalizeResponseRequestWithResolver(req, previous, nil)
+}
+
+func normalizeResponseRequestWithResolver(req ResponseRequest, previous *storedResponse, resolveItem itemReferenceResolver) (*normalizedResponseRequest, error) {
+	seenItemReferences := map[string]struct{}{}
+	resolveItemForRequest := func(id string) (storedResponseItem, bool) {
+		if id == "" {
+			return storedResponseItem{}, false
+		}
+		if _, ok := seenItemReferences[id]; ok {
+			return storedResponseItem{}, true
+		}
+		seenItemReferences[id] = struct{}{}
+		if previous != nil {
+			if _, ok := previous.ItemIDs[id]; ok {
+				return storedResponseItem{}, true
+			}
+		}
+		if resolveItem == nil {
+			return storedResponseItem{}, false
+		}
+		return resolveItem(id)
+	}
+
 	finalize := func(messages []domain.BedrockChatMessage, system []string) (*normalizedResponseRequest, error) {
 		normalizedMessages, normalizedSystem, err := normalizeBedrockConversation(messages, system)
 		if err != nil {
@@ -96,7 +128,7 @@ func normalizeResponseRequest(req ResponseRequest, previous *storedResponse) (*n
 
 	var single json.RawMessage
 	if err := json.Unmarshal(req.Input, &single); err == nil && len(single) > 0 && single[0] == '{' {
-		msgs, sys, err := parseResponseInputItem(single)
+		msgs, sys, err := parseResponseInputItem(single, resolveItemForRequest)
 		if err != nil {
 			return nil, err
 		}
@@ -110,7 +142,7 @@ func normalizeResponseRequest(req ResponseRequest, previous *storedResponse) (*n
 		return nil, fmt.Errorf("unsupported input shape")
 	}
 	for _, item := range items {
-		msgs, sys, err := parseResponseInputItem(item)
+		msgs, sys, err := parseResponseInputItem(item, resolveItemForRequest)
 		if err != nil {
 			return nil, err
 		}
@@ -137,24 +169,45 @@ func normalizeBedrockConversation(messages []domain.BedrockChatMessage, system [
 	if messages[0].Role != "user" {
 		return nil, nil, fmt.Errorf("conversation must start with a user message")
 	}
+	messages = mergeAdjacentSameRoleMessages(messages)
 	messages = normalizeToolResultAdjacency(messages)
+	if err := validateToolResultAdjacency(messages); err != nil {
+		return nil, nil, err
+	}
 	return messages, system, nil
 }
 
 func normalizeToolResultAdjacency(messages []domain.BedrockChatMessage) []domain.BedrockChatMessage {
-	for i := 0; i < len(messages)-1; i++ {
+	messages = mergeAdjacentSameRoleMessages(messages)
+	for i := 0; i < len(messages); i++ {
 		required := toolUseIDs(messages[i].Blocks)
-		if len(required) == 0 || messages[i+1].Role != "user" {
+		if len(required) == 0 {
 			continue
 		}
-		reordered, changed := moveMatchingToolResultsFirst(messages[i+1].Blocks, required)
-		if !changed {
-			continue
+		if i == len(messages)-1 || messages[i+1].Role != "user" {
+			messages = insertUserMessageAfter(messages, i)
 		}
-		messages[i+1].Blocks = reordered
-		messages[i+1].Content = blocksText(reordered)
+		messages, _ = moveLaterToolResultsAfter(messages, i, required)
 	}
-	return messages
+	return dropEmptyMessages(messages)
+}
+
+func mergeAdjacentSameRoleMessages(messages []domain.BedrockChatMessage) []domain.BedrockChatMessage {
+	merged := make([]domain.BedrockChatMessage, 0, len(messages))
+	for _, msg := range messages {
+		if len(merged) > 0 && merged[len(merged)-1].Role == msg.Role {
+			last := &merged[len(merged)-1]
+			last.Blocks = append(last.Blocks, cloneBlocks(msg.Blocks)...)
+			if len(last.Blocks) > 0 {
+				last.Content = blocksText(last.Blocks)
+			} else {
+				last.Content += msg.Content
+			}
+			continue
+		}
+		merged = append(merged, msg)
+	}
+	return merged
 }
 
 func toolUseIDs(blocks []domain.BedrockContentBlock) map[string]struct{} {
@@ -199,6 +252,143 @@ func moveMatchingToolResultsFirst(blocks []domain.BedrockContentBlock, required 
 	return reordered, true
 }
 
+func insertUserMessageAfter(messages []domain.BedrockChatMessage, index int) []domain.BedrockChatMessage {
+	messages = append(messages, domain.BedrockChatMessage{})
+	copy(messages[index+2:], messages[index+1:])
+	messages[index+1] = domain.BedrockChatMessage{Role: "user"}
+	return messages
+}
+
+func moveLaterToolResultsAfter(messages []domain.BedrockChatMessage, toolUseIndex int, required map[string]struct{}) ([]domain.BedrockChatMessage, bool) {
+	next := &messages[toolUseIndex+1]
+	ensureMessageBlocks(next)
+	nextBlocks, changed := moveMatchingToolResultsFirst(next.Blocks, required)
+	next.Blocks = nextBlocks
+
+	present := toolResultIDs(next.Blocks)
+	for id := range required {
+		if _, ok := present[id]; ok {
+			delete(required, id)
+		}
+	}
+	if len(required) == 0 {
+		next.Content = blocksText(next.Blocks)
+		return messages, changed
+	}
+
+	moved := []domain.BedrockContentBlock{}
+	for i := toolUseIndex + 2; i < len(messages); i++ {
+		if messages[i].Role != "user" {
+			continue
+		}
+		ensureMessageBlocks(&messages[i])
+		blocks, extracted := extractMatchingToolResults(messages[i].Blocks, required)
+		if len(extracted) == 0 {
+			continue
+		}
+		moved = append(moved, extracted...)
+		messages[i].Blocks = blocks
+		messages[i].Content = blocksText(blocks)
+		for _, block := range extracted {
+			delete(required, block.ToolUseID)
+		}
+		changed = true
+		if len(required) == 0 {
+			break
+		}
+	}
+	if len(moved) > 0 {
+		next.Blocks = append(moved, next.Blocks...)
+		next.Content = blocksText(next.Blocks)
+	}
+	return messages, changed
+}
+
+func ensureMessageBlocks(message *domain.BedrockChatMessage) {
+	if len(message.Blocks) == 0 && strings.TrimSpace(message.Content) != "" {
+		message.Blocks = []domain.BedrockContentBlock{{
+			Type: "text",
+			Text: message.Content,
+		}}
+	}
+}
+
+func dropEmptyMessages(messages []domain.BedrockChatMessage) []domain.BedrockChatMessage {
+	kept := make([]domain.BedrockChatMessage, 0, len(messages))
+	for _, msg := range messages {
+		if len(msg.Blocks) == 0 && strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		kept = append(kept, msg)
+	}
+	return kept
+}
+
+func extractMatchingToolResults(blocks []domain.BedrockContentBlock, required map[string]struct{}) ([]domain.BedrockContentBlock, []domain.BedrockContentBlock) {
+	remaining := make([]domain.BedrockContentBlock, 0, len(blocks))
+	moved := []domain.BedrockContentBlock{}
+	for _, block := range blocks {
+		if block.Type == "tool_result" {
+			if _, ok := required[block.ToolUseID]; ok {
+				moved = append(moved, block)
+				continue
+			}
+		}
+		remaining = append(remaining, block)
+	}
+	return remaining, moved
+}
+
+func toolResultIDs(blocks []domain.BedrockContentBlock) map[string]struct{} {
+	ids := map[string]struct{}{}
+	for _, block := range blocks {
+		if block.Type == "tool_result" && block.ToolUseID != "" {
+			ids[block.ToolUseID] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func validateToolResultAdjacency(messages []domain.BedrockChatMessage) error {
+	for i, msg := range messages {
+		required := toolUseIDs(msg.Blocks)
+		if len(required) == 0 {
+			continue
+		}
+		if i == len(messages)-1 || messages[i+1].Role != "user" {
+			return fmt.Errorf("tool_use ids require a following user tool_result message: %s", strings.Join(sortedMapKeys(required), ", "))
+		}
+		missing := copyStringSet(required)
+		for _, block := range messages[i+1].Blocks {
+			if block.Type != "tool_result" {
+				break
+			}
+			delete(missing, block.ToolUseID)
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("tool_use ids require matching tool_result blocks first in the next user message: %s", strings.Join(sortedMapKeys(missing), ", "))
+		}
+	}
+	return nil
+}
+
+func copyStringSet(values map[string]struct{}) map[string]struct{} {
+	copied := make(map[string]struct{}, len(values))
+	for key := range values {
+		copied[key] = struct{}{}
+	}
+	return copied
+}
+
+func sortedMapKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func assistantMessageCanBecomeSystem(message domain.BedrockChatMessage) bool {
 	if len(message.Blocks) == 0 {
 		return true
@@ -218,7 +408,7 @@ func assistantMessageText(message domain.BedrockChatMessage) string {
 	return message.Content
 }
 
-func parseResponseInputItem(raw json.RawMessage) ([]domain.BedrockChatMessage, []string, error) {
+func parseResponseInputItem(raw json.RawMessage, resolveItem itemReferenceResolver) ([]domain.BedrockChatMessage, []string, error) {
 	if len(raw) == 0 {
 		return nil, nil, nil
 	}
@@ -228,6 +418,7 @@ func parseResponseInputItem(raw json.RawMessage) ([]domain.BedrockChatMessage, [
 	}
 
 	var item struct {
+		ID        string          `json:"id"`
 		Type      string          `json:"type"`
 		Role      string          `json:"role"`
 		Content   json.RawMessage `json:"content"`
@@ -242,6 +433,15 @@ func parseResponseInputItem(raw json.RawMessage) ([]domain.BedrockChatMessage, [
 		return nil, nil, fmt.Errorf("unsupported input item shape")
 	}
 	switch item.Type {
+	case "item_reference":
+		if resolveItem == nil {
+			return nil, nil, nil
+		}
+		resolved, ok := resolveItem(item.ID)
+		if !ok {
+			return nil, nil, nil
+		}
+		return cloneMessages(resolved.Messages), nil, nil
 	case "", "message":
 		role := strings.ToLower(strings.TrimSpace(item.Role))
 		if role == "" {
@@ -415,6 +615,66 @@ func buildResponseOutputItems(resp *domain.ConverseResponse) ([]map[string]any, 
 	}
 	flushText()
 	return output, toolCalls > 1
+}
+
+func responseOutputItems(response map[string]any) (map[string]struct{}, map[string]storedResponseItem) {
+	output, _ := response["output"].([]map[string]any)
+	ids := make(map[string]struct{}, len(output))
+	items := make(map[string]storedResponseItem, len(output))
+	for _, item := range output {
+		id, _ := item["id"].(string)
+		if id != "" {
+			ids[id] = struct{}{}
+			if messages := outputItemMessages(item); len(messages) > 0 {
+				items[id] = storedResponseItem{Messages: messages}
+			}
+		}
+	}
+	return ids, items
+}
+
+func outputItemMessages(item map[string]any) []domain.BedrockChatMessage {
+	switch itemType, _ := item["type"].(string); itemType {
+	case "message":
+		blocks := []domain.BedrockContentBlock{}
+		content, _ := item["content"].([]map[string]any)
+		for _, part := range content {
+			partType, _ := part["type"].(string)
+			if partType != "" && partType != "output_text" && partType != "text" {
+				continue
+			}
+			text, _ := part["text"].(string)
+			if text != "" {
+				blocks = append(blocks, domain.BedrockContentBlock{Type: "text", Text: text})
+			}
+		}
+		if len(blocks) == 0 {
+			return nil
+		}
+		return []domain.BedrockChatMessage{{
+			Role:    "assistant",
+			Content: blocksText(blocks),
+			Blocks:  blocks,
+		}}
+	case "function_call":
+		callID, _ := item["call_id"].(string)
+		name, _ := item["name"].(string)
+		arguments, _ := item["arguments"].(string)
+		if callID == "" {
+			return nil
+		}
+		return []domain.BedrockChatMessage{{
+			Role: "assistant",
+			Blocks: []domain.BedrockContentBlock{{
+				Type:      "tool_use",
+				ToolUseID: callID,
+				ToolName:  name,
+				ToolInput: []byte(nonEmptyJSON([]byte(arguments), []byte(`{}`))),
+			}},
+		}}
+	default:
+		return nil
+	}
 }
 
 func parseResponseTools(raw json.RawMessage) ([]domain.ToolDefinition, []map[string]any, error) {

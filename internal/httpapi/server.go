@@ -41,6 +41,7 @@ type Server struct {
 	logger    *slog.Logger
 	respMu    sync.RWMutex
 	responses map[string]storedResponse
+	respItems map[string]storedResponseItem
 }
 
 var responsesUpgrader = websocket.Upgrader{
@@ -65,6 +66,7 @@ func NewWithLogger(cfg *config.Config, store *db.Store, provider Provider, versi
 		version:   version,
 		logger:    logger,
 		responses: map[string]storedResponse{},
+		respItems: map[string]storedResponseItem{},
 	}
 }
 
@@ -331,7 +333,7 @@ func (s *Server) processResponseRequest(ctx context.Context, apiKey *domain.APIK
 		}
 		previous = &item
 	}
-	normalized, err := normalizeResponseRequest(req, previous)
+	normalized, err := normalizeResponseRequestWithResolver(req, previous, s.lookupResponseItem)
 	if err != nil {
 		return nil, http.StatusBadRequest, err
 	}
@@ -403,6 +405,7 @@ func (s *Server) processResponseRequest(ctx context.Context, apiKey *domain.APIK
 	responseID := "resp_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	response := buildResponseEnvelope(responseID, req, normalized, upstreamResp)
 	s.logResponseDebug(path, responseID, req, upstreamResp, response)
+	itemIDs, responseItems := responseOutputItems(response)
 	message := upstreamResp.Message
 	if len(message.Blocks) == 0 && strings.TrimSpace(message.Content) == "" && strings.TrimSpace(upstreamResp.Text) != "" {
 		message = domain.BedrockChatMessage{
@@ -418,7 +421,9 @@ func (s *Server) processResponseRequest(ctx context.Context, apiKey *domain.APIK
 		Response: response,
 		System:   cloneStrings(normalized.System),
 		Messages: append(cloneMessages(normalized.Messages), message),
+		ItemIDs:  itemIDs,
 	})
+	s.storeResponseItems(responseItems)
 	return response, http.StatusOK, nil
 }
 
@@ -1066,11 +1071,49 @@ func (s *Server) storeResponse(id string, item storedResponse) {
 	s.responses[id] = item
 }
 
+func (s *Server) storeResponseItems(items map[string]storedResponseItem) {
+	s.respMu.Lock()
+	defer s.respMu.Unlock()
+	for itemID, item := range items {
+		s.respItems[itemID] = storedResponseItem{
+			Messages: cloneMessages(item.Messages),
+		}
+	}
+}
+
 func (s *Server) lookupResponse(id string) (storedResponse, bool) {
 	s.respMu.RLock()
 	defer s.respMu.RUnlock()
 	item, ok := s.responses[id]
 	return item, ok
+}
+
+func (s *Server) lookupResponseItem(id string) (storedResponseItem, bool) {
+	s.respMu.RLock()
+	defer s.respMu.RUnlock()
+	item, ok := s.respItems[id]
+	if ok {
+		return storedResponseItem{
+			Messages: cloneMessages(item.Messages),
+		}, true
+	}
+	for _, response := range s.responses {
+		output, _ := response.Response["output"].([]map[string]any)
+		for _, outputItem := range output {
+			itemID, _ := outputItem["id"].(string)
+			if itemID != id {
+				continue
+			}
+			messages := outputItemMessages(outputItem)
+			if len(messages) == 0 {
+				return storedResponseItem{}, false
+			}
+			return storedResponseItem{
+				Messages: messages,
+			}, true
+		}
+	}
+	return storedResponseItem{}, false
 }
 
 type clientKeyContextKey struct{}

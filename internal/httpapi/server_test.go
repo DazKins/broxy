@@ -61,6 +61,11 @@ type toolProvider struct {
 	requests []domain.ConverseRequest
 }
 
+type mixedToolProvider struct {
+	mu       sync.Mutex
+	requests []domain.ConverseRequest
+}
+
 type errorProvider struct {
 	err error
 }
@@ -132,6 +137,59 @@ func (p *toolProvider) Converse(ctx context.Context, req domain.ConverseRequest)
 }
 
 func (p *toolProvider) Requests() []domain.ConverseRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	items := make([]domain.ConverseRequest, len(p.requests))
+	copy(items, p.requests)
+	return items
+}
+
+func (p *mixedToolProvider) Converse(ctx context.Context, req domain.ConverseRequest) (*domain.ConverseResponse, error) {
+	p.mu.Lock()
+	p.requests = append(p.requests, req)
+	p.mu.Unlock()
+
+	if hasToolResult(req.Messages) {
+		return &domain.ConverseResponse{
+			ModelID: req.ModelID,
+			Text:    "tool completed",
+			Message: domain.BedrockChatMessage{
+				Role: "assistant",
+				Blocks: []domain.BedrockContentBlock{{
+					Type: "text",
+					Text: "tool completed",
+				}},
+			},
+			StopReason: "end_turn",
+			Usage:      domain.TokenUsage{Input: 20, Output: 4, Total: 24},
+			LatencyMS:  42,
+		}, nil
+	}
+
+	return &domain.ConverseResponse{
+		ModelID: req.ModelID,
+		Message: domain.BedrockChatMessage{
+			Role: "assistant",
+			Blocks: []domain.BedrockContentBlock{
+				{
+					Type: "text",
+					Text: "I'll inspect it.",
+				},
+				{
+					Type:      "tool_use",
+					ToolUseID: "call_exec_1",
+					ToolName:  "exec_command",
+					ToolInput: []byte(`{"cmd":"pwd"}`),
+				},
+			},
+		},
+		StopReason: "tool_use",
+		Usage:      domain.TokenUsage{Input: 12, Output: 8, Total: 20},
+		LatencyMS:  42,
+	}, nil
+}
+
+func (p *mixedToolProvider) Requests() []domain.ConverseRequest {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	items := make([]domain.ConverseRequest, len(p.requests))
@@ -508,6 +566,7 @@ func TestResponsesProxyToolCall(t *testing.T) {
 	var resp struct {
 		ID     string `json:"id"`
 		Output []struct {
+			ID        string `json:"id"`
 			Type      string `json:"type"`
 			Name      string `json:"name"`
 			CallID    string `json:"call_id"`
@@ -519,6 +578,9 @@ func TestResponsesProxyToolCall(t *testing.T) {
 	}
 	if len(resp.Output) != 1 || resp.Output[0].Type != "function_call" {
 		t.Fatalf("unexpected output: %s", rec.Body.String())
+	}
+	if resp.Output[0].ID == "" {
+		t.Fatalf("function call output item id was empty: %#v", resp.Output[0])
 	}
 	if resp.Output[0].Name != "exec_command" || resp.Output[0].CallID != "call_exec_1" || resp.Output[0].Arguments != "{\"cmd\":\"pwd\"}" {
 		t.Fatalf("unexpected function call item: %#v", resp.Output[0])
@@ -576,6 +638,311 @@ func TestResponsesProxyToolCall(t *testing.T) {
 	}
 	if requests[1].Messages[1].Blocks[0].Type != "tool_use" || requests[1].Messages[2].Blocks[0].Type != "tool_result" {
 		t.Fatalf("unexpected tool messages = %#v", requests[1].Messages)
+	}
+}
+
+func TestResponsesProxyItemReferenceWithPreviousResponse(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	addTestModelRoute(t, store)
+	provider := &toolProvider{}
+	server := New(cfg, store, provider, "test")
+
+	firstBody := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": "run pwd",
+		"tools": []map[string]any{{
+			"type": "function",
+			"name": "exec_command",
+			"parameters": map[string]any{
+				"type": "object",
+			},
+		}},
+	}
+	payload, _ := json.Marshal(firstBody)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var firstResp struct {
+		ID     string `json:"id"`
+		Output []struct {
+			ID     string `json:"id"`
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &firstResp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(firstResp.Output) != 1 || firstResp.Output[0].Type != "function_call" || firstResp.Output[0].ID == "" {
+		t.Fatalf("unexpected first response: %s", rec.Body.String())
+	}
+
+	secondBody := map[string]any{
+		"model":                "claude-haiku-4-5",
+		"previous_response_id": firstResp.ID,
+		"input": []map[string]any{
+			{
+				"type": "item_reference",
+				"id":   firstResp.Output[0].ID,
+			},
+			{
+				"type":    "function_call_output",
+				"call_id": firstResp.Output[0].CallID,
+				"output":  "/Users/personal/broxy",
+			},
+		},
+	}
+	secondPayload, _ := json.Marshal(secondBody)
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(secondPayload))
+	secondReq.Header.Set("Authorization", "Bearer bpx_test_secret")
+	secondRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(secondRec, secondReq)
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("second status = %d body=%s", secondRec.Code, secondRec.Body.String())
+	}
+
+	requests := provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if len(requests[1].Messages) != 3 {
+		t.Fatalf("item_reference duplicated previous context: %#v", requests[1].Messages)
+	}
+	if requests[1].Messages[1].Blocks[0].Type != "tool_use" || requests[1].Messages[2].Blocks[0].Type != "tool_result" {
+		t.Fatalf("unexpected follow-up messages = %#v", requests[1].Messages)
+	}
+}
+
+func TestResponsesProxyItemReferenceResolvesStoredContext(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	addTestModelRoute(t, store)
+	provider := &toolProvider{}
+	server := New(cfg, store, provider, "test")
+
+	firstBody := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": "run pwd",
+		"tools": []map[string]any{{
+			"type": "function",
+			"name": "exec_command",
+			"parameters": map[string]any{
+				"type": "object",
+			},
+		}},
+	}
+	payload, _ := json.Marshal(firstBody)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var firstResp struct {
+		Output []struct {
+			ID     string `json:"id"`
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &firstResp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(firstResp.Output) != 1 || firstResp.Output[0].ID == "" {
+		t.Fatalf("unexpected first response: %s", rec.Body.String())
+	}
+
+	secondBody := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": []map[string]any{
+			{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]any{{
+					"type": "input_text",
+					"text": "run pwd",
+				}},
+			},
+			{
+				"type": "item_reference",
+				"id":   firstResp.Output[0].ID,
+			},
+			{
+				"type":    "function_call_output",
+				"call_id": firstResp.Output[0].CallID,
+				"output":  "/Users/personal/broxy",
+			},
+		},
+	}
+	secondPayload, _ := json.Marshal(secondBody)
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(secondPayload))
+	secondReq.Header.Set("Authorization", "Bearer bpx_test_secret")
+	secondRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(secondRec, secondReq)
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("second status = %d body=%s", secondRec.Code, secondRec.Body.String())
+	}
+
+	requests := provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if len(requests[1].Messages) != 3 {
+		t.Fatalf("unexpected resolved context = %#v", requests[1].Messages)
+	}
+	if requests[1].Messages[0].Content != "run pwd" || requests[1].Messages[1].Blocks[0].Type != "tool_use" || requests[1].Messages[2].Blocks[0].Type != "tool_result" {
+		t.Fatalf("unexpected follow-up messages = %#v", requests[1].Messages)
+	}
+}
+
+func TestResponsesProxyMultipleItemReferencesResolveSpecificItems(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	addTestModelRoute(t, store)
+	provider := &mixedToolProvider{}
+	server := New(cfg, store, provider, "test")
+
+	firstBody := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": "show readme lines",
+		"tools": []map[string]any{{
+			"type": "function",
+			"name": "exec_command",
+			"parameters": map[string]any{
+				"type": "object",
+			},
+		}},
+	}
+	payload, _ := json.Marshal(firstBody)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var firstResp struct {
+		Output []struct {
+			ID     string `json:"id"`
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &firstResp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(firstResp.Output) != 2 || firstResp.Output[0].Type != "message" || firstResp.Output[1].Type != "function_call" {
+		t.Fatalf("unexpected first output: %s", rec.Body.String())
+	}
+
+	secondBody := map[string]any{
+		"model": "claude-haiku-4-5",
+		"input": []map[string]any{
+			{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]any{{
+					"type": "input_text",
+					"text": "show readme lines",
+				}},
+			},
+			{
+				"type": "item_reference",
+				"id":   firstResp.Output[0].ID,
+			},
+			{
+				"type": "item_reference",
+				"id":   firstResp.Output[1].ID,
+			},
+			{
+				"type":    "function_call_output",
+				"call_id": firstResp.Output[1].CallID,
+				"output":  "README lines",
+			},
+		},
+	}
+	secondPayload, _ := json.Marshal(secondBody)
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(secondPayload))
+	secondReq.Header.Set("Authorization", "Bearer bpx_test_secret")
+	secondRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(secondRec, secondReq)
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("second status = %d body=%s", secondRec.Code, secondRec.Body.String())
+	}
+
+	requests := provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if len(requests[1].Messages) != 3 {
+		t.Fatalf("unexpected resolved messages = %#v", requests[1].Messages)
+	}
+	assistant := requests[1].Messages[1]
+	if assistant.Role != "assistant" || len(assistant.Blocks) != 2 || assistant.Blocks[0].Type != "text" || assistant.Blocks[1].Type != "tool_use" {
+		t.Fatalf("unexpected assistant item references = %#v", assistant)
+	}
+	if requests[1].Messages[2].Blocks[0].Type != "tool_result" || requests[1].Messages[2].Blocks[0].ToolUseID != firstResp.Output[1].CallID {
+		t.Fatalf("unexpected tool result = %#v", requests[1].Messages[2])
 	}
 }
 
@@ -719,6 +1086,140 @@ func TestResponsesProxyMovesUserTextAfterToolResult(t *testing.T) {
 	}
 	if blocks[1].Type != "text" || !strings.Contains(blocks[1].Text, "apply_patch was requested") {
 		t.Fatalf("warning text was not preserved after tool result: %#v", blocks)
+	}
+}
+
+func TestResponsesProxyMovesLaterToolResultImmediatelyAfterToolUse(t *testing.T) {
+	input := []map[string]any{
+		{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "input_text",
+				"text": "Research the repo",
+			}},
+		},
+		{
+			"type":      "function_call",
+			"name":      "task",
+			"call_id":   "tooluse_1",
+			"arguments": `{"description":"research"}`,
+		},
+		{
+			"type": "message",
+			"role": "assistant",
+			"content": []map[string]any{{
+				"type": "output_text",
+				"text": "I'll wait for the sub-agent.",
+			}},
+		},
+		{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "input_text",
+				"text": "Did that work?",
+			}},
+		},
+		{
+			"type":    "function_call_output",
+			"call_id": "tooluse_1",
+			"output":  "<task_metadata>session_id: ses_1</task_metadata>",
+		},
+	}
+	payload, _ := json.Marshal(input)
+	normalized, err := normalizeResponseRequest(ResponseRequest{
+		Model: "claude-haiku-4-5",
+		Input: payload,
+	}, nil)
+	if err != nil {
+		t.Fatalf("normalizeResponseRequest() error = %v", err)
+	}
+	if len(normalized.Messages) != 3 {
+		t.Fatalf("unexpected messages = %#v", normalized.Messages)
+	}
+	assistant := normalized.Messages[1]
+	if assistant.Role != "assistant" || len(assistant.Blocks) != 2 || assistant.Blocks[0].Type != "tool_use" || assistant.Blocks[1].Type != "text" {
+		t.Fatalf("unexpected assistant message = %#v", assistant)
+	}
+	userAfterTool := normalized.Messages[2]
+	if userAfterTool.Role != "user" || len(userAfterTool.Blocks) != 2 || userAfterTool.Blocks[0].Type != "tool_result" || userAfterTool.Blocks[0].ToolUseID != "tooluse_1" {
+		t.Fatalf("tool result was not moved immediately after tool use: %#v", userAfterTool)
+	}
+	if userAfterTool.Blocks[1].Type != "text" || userAfterTool.Blocks[1].Text != "Did that work?" {
+		t.Fatalf("later user text was not preserved after moved tool result: %#v", userAfterTool)
+	}
+}
+
+func TestResponsesProxyNormalizesOpenCodeSubAgentItemReferenceShape(t *testing.T) {
+	input := []map[string]any{
+		{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "input_text",
+				"text": "do in depth research on this repo, spin up a sub agent",
+			}},
+		},
+		{
+			"type": "item_reference",
+			"id":   "msg_164322d45ad84b75ab3cf6da89bf5d18",
+		},
+		{
+			"type": "item_reference",
+			"id":   "fc_9707084e2f8d403ca9223e8ec750a9c6",
+		},
+		{
+			"type":    "function_call_output",
+			"call_id": "tooluse_6uItI7GlrQ8TdXExPVF66X",
+			"output":  "<task_metadata>session_id: ses_27f8d902bffeobRGsC9Cn6S4Wh</task_metadata>",
+		},
+	}
+	payload, _ := json.Marshal(input)
+	resolver := func(id string) (storedResponseItem, bool) {
+		switch id {
+		case "msg_164322d45ad84b75ab3cf6da89bf5d18":
+			return storedResponseItem{Messages: []domain.BedrockChatMessage{{
+				Role: "assistant",
+				Blocks: []domain.BedrockContentBlock{{
+					Type: "text",
+					Text: "I'll use a sub-agent for the research.",
+				}},
+			}}}, true
+		case "fc_9707084e2f8d403ca9223e8ec750a9c6":
+			return storedResponseItem{Messages: []domain.BedrockChatMessage{{
+				Role: "assistant",
+				Blocks: []domain.BedrockContentBlock{{
+					Type:      "tool_use",
+					ToolUseID: "tooluse_6uItI7GlrQ8TdXExPVF66X",
+					ToolName:  "task",
+					ToolInput: []byte(`{"description":"Research this repo"}`),
+				}},
+			}}}, true
+		default:
+			return storedResponseItem{}, false
+		}
+	}
+	normalized, err := normalizeResponseRequestWithResolver(ResponseRequest{
+		Model: "claude-haiku-4-5",
+		Input: payload,
+	}, nil, resolver)
+	if err != nil {
+		t.Fatalf("normalizeResponseRequestWithResolver() error = %v", err)
+	}
+	if len(normalized.Messages) != 3 {
+		t.Fatalf("unexpected messages = %#v", normalized.Messages)
+	}
+	assistant := normalized.Messages[1]
+	if assistant.Role != "assistant" || len(assistant.Blocks) != 2 || assistant.Blocks[0].Type != "text" || assistant.Blocks[1].Type != "tool_use" {
+		t.Fatalf("unexpected assistant message = %#v", assistant)
+	}
+	userAfterTool := normalized.Messages[2]
+	if userAfterTool.Role != "user" || len(userAfterTool.Blocks) != 1 || userAfterTool.Blocks[0].Type != "tool_result" {
+		t.Fatalf("unexpected user tool_result message = %#v", userAfterTool)
+	}
+	if userAfterTool.Blocks[0].ToolUseID != "tooluse_6uItI7GlrQ8TdXExPVF66X" {
+		t.Fatalf("tool result id = %q", userAfterTool.Blocks[0].ToolUseID)
 	}
 }
 
