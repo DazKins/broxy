@@ -235,6 +235,33 @@ Start Codex with the profile:
 codex --profile broxy
 ```
 
+## Using Broxy with Claude Code
+
+Claude Code can use Broxy through the Anthropic Messages-compatible endpoint. First create a Broxy client key:
+
+```bash
+broxy apikey create --name claude-code
+```
+
+Export that key in the shell where you start Claude Code:
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+export ANTHROPIC_AUTH_TOKEN="YOUR_PROXY_KEY"
+export ANTHROPIC_MODEL="global.anthropic.claude-opus-4-6-v1"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="us.anthropic.claude-haiku-4-5-20251001-v1:0"
+export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+```
+
+Make sure each configured model is available as a Broxy model alias. For example:
+
+```bash
+broxy models add \
+  --alias global.anthropic.claude-opus-4-6-v1 \
+  --model-id global.anthropic.claude-opus-4-6-v1 \
+  --region us-east-1
+```
+
 ## Bedrock authentication
 
 ### AWS credential chain

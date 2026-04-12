@@ -79,6 +79,8 @@ func (s *Server) Router() http.Handler {
 		r.Use(s.requireClientAPIKey)
 		r.Get("/models", s.handleListModels)
 		r.Post("/chat/completions", s.handleChatCompletions)
+		r.Post("/messages", s.handleAnthropicMessages)
+		r.Post("/messages/count_tokens", s.handleAnthropicCountTokens)
 		r.Get("/responses", s.handleResponsesWebSocket)
 		r.Post("/responses", s.handleResponses)
 		r.Get("/responses/{id}", s.handleGetResponse)
@@ -716,7 +718,10 @@ func (s *Server) requireClientAPIKey(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := security.NormalizeBearer(r.Header.Get("Authorization"))
 		if token == "" {
-			writeError(w, http.StatusUnauthorized, "missing bearer token")
+			token = strings.TrimSpace(r.Header.Get("X-Api-Key"))
+		}
+		if token == "" {
+			writeError(w, http.StatusUnauthorized, "missing client API key")
 			return
 		}
 		item, err := s.store.AuthenticateAPIKey(r.Context(), security.HashAPIKey(token))
@@ -757,6 +762,9 @@ func (s *Server) resolveModel(ctx context.Context, requested string, reqTemp *fl
 	if route, err := s.store.GetModelRoute(ctx, requested); err != nil {
 		return nil, "", "", nil, nil, err
 	} else if route != nil {
+		if !route.Enabled {
+			return nil, "", "", nil, nil, fmt.Errorf("model %q is currently disabled", requested)
+		}
 		temp := reqTemp
 		if temp == nil {
 			temp = route.DefaultTemperature
@@ -767,11 +775,7 @@ func (s *Server) resolveModel(ctx context.Context, requested string, reqTemp *fl
 		}
 		return route, route.BedrockModelID, route.Region, temp, maxTokens, nil
 	}
-	region := s.cfg.Upstream.Region
-	if strings.TrimSpace(region) == "" {
-		return nil, "", "", nil, nil, errors.New("default Bedrock region is not configured")
-	}
-	return nil, requested, region, reqTemp, reqMaxTokens, nil
+	return nil, "", "", nil, nil, fmt.Errorf("model %q is not available; configure it as a model alias first", requested)
 }
 
 func (s *Server) streamResponse(w http.ResponseWriter, model string, upstreamResp *domain.ConverseResponse) {

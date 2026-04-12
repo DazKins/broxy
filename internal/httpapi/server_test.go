@@ -150,6 +150,18 @@ func hasToolResult(messages []domain.BedrockChatMessage) bool {
 	return false
 }
 
+func addTestModelRoute(t *testing.T, store *db.Store) {
+	t.Helper()
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+}
+
 func TestChatCompletionProxy(t *testing.T) {
 	tempDir := t.TempDir()
 	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
@@ -464,6 +476,7 @@ func TestResponsesProxyToolCall(t *testing.T) {
 	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}
+	addTestModelRoute(t, store)
 	provider := &toolProvider{}
 	server := New(cfg, store, provider, "test")
 
@@ -587,6 +600,7 @@ func TestResponsesProxyToolCallJSONOutput(t *testing.T) {
 	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}
+	addTestModelRoute(t, store)
 	provider := &toolProvider{}
 	server := New(cfg, store, provider, "test")
 
@@ -863,6 +877,7 @@ func TestResponsesProxyToolCallStreaming(t *testing.T) {
 	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}
+	addTestModelRoute(t, store)
 	server := New(cfg, store, &toolProvider{}, "test")
 	body := map[string]any{
 		"model":  "claude-haiku-4-5",
@@ -918,6 +933,7 @@ func TestResponsesDebugLogsRawUpstreamResponse(t *testing.T) {
 	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}
+	addTestModelRoute(t, store)
 
 	var logs bytes.Buffer
 	logger := logging.New("debug", &logs)
@@ -970,6 +986,7 @@ func TestResponsesProxyAllowsWebSearchTool(t *testing.T) {
 	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}
+	addTestModelRoute(t, store)
 	provider := &recordingProvider{}
 	server := New(cfg, store, provider, "test")
 	body := map[string]any{
@@ -1037,6 +1054,7 @@ func TestResponsesWebSocketProxy(t *testing.T) {
 	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}
+	addTestModelRoute(t, store)
 	server := New(cfg, store, fakeProvider{}, "test")
 	ts := httptest.NewServer(server.Router())
 	defer ts.Close()
@@ -1240,5 +1258,487 @@ func TestKeyUsageEndpoint(t *testing.T) {
 	}
 	if usage.TotalTokens != 20 {
 		t.Fatalf("total tokens = %d, want 20", usage.TotalTokens)
+	}
+}
+
+func TestUnknownModelRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	server := New(cfg, store, fakeProvider{}, "test")
+
+	body := map[string]any{
+		"model": "us.anthropic.claude-3-opus-20240229-v1:0",
+		"messages": []map[string]any{
+			{"role": "user", "content": "hello"},
+		},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown model should be rejected: status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not available") {
+		t.Fatalf("error should mention model not available, got: %s", rec.Body.String())
+	}
+}
+
+func TestDisabledModelRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "disabled-model",
+		BedrockModelID: "us.anthropic.claude-3-opus-20240229-v1:0",
+		Region:         "us-east-1",
+		Enabled:        false,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	server := New(cfg, store, fakeProvider{}, "test")
+
+	body := map[string]any{
+		"model": "disabled-model",
+		"messages": []map[string]any{
+			{"role": "user", "content": "hello"},
+		},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("disabled model should be rejected: status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "disabled") {
+		t.Fatalf("error should mention model disabled, got: %s", rec.Body.String())
+	}
+}
+
+func TestAnthropicMessagesProxy(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	provider := &recordingProvider{}
+	server := New(cfg, store, provider, "test")
+	body := map[string]any{
+		"model":      "claude-haiku-4-5",
+		"max_tokens": 256,
+		"system": []map[string]any{{
+			"type": "text",
+			"text": "Be terse.",
+		}},
+		"messages": []map[string]any{
+			{"role": "user", "content": "hello"},
+		},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(payload))
+	req.Header.Set("X-Api-Key", "bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Model   string `json:"model"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		StopReason string `json:"stop_reason"`
+		Usage      struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if resp.Type != "message" || resp.Role != "assistant" || resp.Model != "claude-haiku-4-5" {
+		t.Fatalf("unexpected response envelope: %#v", resp)
+	}
+	if len(resp.Content) != 1 || resp.Content[0].Type != "text" || resp.Content[0].Text != "hello from bedrock" {
+		t.Fatalf("unexpected content: %#v", resp.Content)
+	}
+	if resp.StopReason != "end_turn" {
+		t.Fatalf("stop_reason = %q", resp.StopReason)
+	}
+	if resp.Usage.InputTokens != 12 || resp.Usage.OutputTokens != 8 {
+		t.Fatalf("unexpected usage = %#v", resp.Usage)
+	}
+
+	requests := provider.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if requests[0].ModelID != "us.anthropic.claude-haiku-4-5-20251001-v1:0" {
+		t.Fatalf("model id = %q", requests[0].ModelID)
+	}
+	if len(requests[0].System) != 1 || requests[0].System[0] != "Be terse." {
+		t.Fatalf("system = %#v", requests[0].System)
+	}
+	if len(requests[0].Messages) != 1 || requests[0].Messages[0].Content != "hello" {
+		t.Fatalf("messages = %#v", requests[0].Messages)
+	}
+	if requests[0].MaxTokens == nil || *requests[0].MaxTokens != 256 {
+		t.Fatalf("max tokens = %#v", requests[0].MaxTokens)
+	}
+}
+
+func TestAnthropicMessagesProxyToolCall(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	provider := &toolProvider{}
+	server := New(cfg, store, provider, "test")
+	body := map[string]any{
+		"model": "claude-haiku-4-5",
+		"messages": []map[string]any{
+			{"role": "user", "content": "run pwd"},
+		},
+		"tools": []map[string]any{{
+			"name":        "exec_command",
+			"description": "Run a command",
+			"input_schema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"cmd": map[string]any{"type": "string"},
+				},
+				"required": []string{"cmd"},
+			},
+		}},
+		"tool_choice": map[string]any{"type": "any"},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Content []struct {
+			Type  string          `json:"type"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		} `json:"content"`
+		StopReason string `json:"stop_reason"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(resp.Content) != 1 || resp.Content[0].Type != "tool_use" {
+		t.Fatalf("unexpected content: %s", rec.Body.String())
+	}
+	if resp.Content[0].ID != "call_exec_1" || resp.Content[0].Name != "exec_command" || string(resp.Content[0].Input) != `{"cmd":"pwd"}` {
+		t.Fatalf("unexpected tool_use: %#v", resp.Content[0])
+	}
+	if resp.StopReason != "tool_use" {
+		t.Fatalf("stop_reason = %q", resp.StopReason)
+	}
+
+	requests := provider.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if len(requests[0].Tools) != 1 || requests[0].Tools[0].Name != "exec_command" {
+		t.Fatalf("tools = %#v", requests[0].Tools)
+	}
+	if requests[0].ToolChoice == nil || requests[0].ToolChoice.Type != "required" {
+		t.Fatalf("tool choice = %#v", requests[0].ToolChoice)
+	}
+}
+
+func TestAnthropicMessagesProxyToolResult(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	provider := &toolProvider{}
+	server := New(cfg, store, provider, "test")
+	body := map[string]any{
+		"model": "claude-haiku-4-5",
+		"messages": []map[string]any{
+			{"role": "user", "content": "run pwd"},
+			{"role": "assistant", "content": []map[string]any{{
+				"type":  "tool_use",
+				"id":    "call_exec_1",
+				"name":  "exec_command",
+				"input": map[string]any{"cmd": "pwd"},
+			}}},
+			{"role": "user", "content": []map[string]any{{
+				"type":        "tool_result",
+				"tool_use_id": "call_exec_1",
+				"content":     "/Users/personal/broxy",
+			}}},
+		},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "tool completed") {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+	requests := provider.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if len(requests[0].Messages) != 3 {
+		t.Fatalf("messages = %#v", requests[0].Messages)
+	}
+	if requests[0].Messages[1].Blocks[0].Type != "tool_use" || requests[0].Messages[2].Blocks[0].Type != "tool_result" {
+		t.Fatalf("unexpected tool messages = %#v", requests[0].Messages)
+	}
+}
+
+func TestAnthropicMessagesProxyStream(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	server := New(cfg, store, fakeProvider{}, "test")
+	body := map[string]any{
+		"model":  "claude-haiku-4-5",
+		"stream": true,
+		"messages": []map[string]any{
+			{"role": "user", "content": "hello"},
+		},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	bodyText := rec.Body.String()
+	for _, want := range []string{"event: message_start", "event: content_block_delta", "event: message_delta", "event: message_stop"} {
+		if !strings.Contains(bodyText, want) {
+			t.Fatalf("missing %q in stream: %s", want, bodyText)
+		}
+	}
+}
+
+func TestAnthropicCountTokens(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	server := New(cfg, store, fakeProvider{}, "test")
+	body := map[string]any{
+		"model": "claude-haiku-4-5",
+		"messages": []map[string]any{
+			{"role": "user", "content": "hello"},
+		},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		InputTokens int `json:"input_tokens"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if resp.InputTokens <= 0 {
+		t.Fatalf("input_tokens = %d", resp.InputTokens)
 	}
 }
