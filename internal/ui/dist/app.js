@@ -280,13 +280,21 @@ async function renderModels() {
         <td>${item.default_temperature ?? "<span class='muted'>default</span>"}</td>
         <td>${item.default_max_tokens ?? "<span class='muted'>default</span>"}</td>
         <td>${item.enabled ? "enabled" : "disabled"}</td>
+        <td><button class="danger-button compact-button" data-remove-model="${escapeHTML(item.alias)}">Remove</button></td>
       </tr>`,
     )
     .join("");
   document.getElementById("models-table").innerHTML = tableHTML(
-    ["Alias", "Bedrock model", "Region", "Temp", "Max tokens", "Status"],
+    ["Alias", "Bedrock model", "Region", "Temp", "Max tokens", "Status", ""],
     rows,
   );
+  document.querySelectorAll("[data-remove-model]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await api(`/api/admin/models/${encodeURIComponent(button.dataset.removeModel)}`, { method: "DELETE" });
+      flash("Removed the model route.");
+      await renderModels();
+    });
+  });
 }
 
 async function renderSettings() {

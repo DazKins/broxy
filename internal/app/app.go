@@ -598,11 +598,15 @@ func newModelsCommand(configPath *string) *cobra.Command {
 			if alias == "" || modelID == "" || region == "" {
 				return fmt.Errorf("--alias, --model-id, and --region are required")
 			}
-			_, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			cfg, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
 			if err != nil {
 				return err
 			}
 			defer cleanup()
+			previous, err := store.GetModelRoute(cmd.Context(), alias)
+			if err != nil {
+				return err
+			}
 			var tempPtr *float64
 			if tempSet {
 				tempPtr = &temp
@@ -622,6 +626,9 @@ func newModelsCommand(configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := syncModelPricing(cmd.Context(), store, cfg.PricingPath, previous, item); err != nil {
+				return err
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Upserted %s -> %s (%s)\n", item.Alias, item.BedrockModelID, item.Region)
 			return nil
 		},
@@ -634,6 +641,36 @@ func newModelsCommand(configPath *string) *cobra.Command {
 	addCmd.Flags().BoolVar(&tempSet, "set-temperature", false, "apply --temperature")
 	addCmd.Flags().BoolVar(&maxSet, "set-max-tokens", false, "apply --max-tokens")
 	cmd.AddCommand(addCmd)
+	removeCmd := &cobra.Command{
+		Use:     "remove --alias <alias>",
+		Aliases: []string{"rm", "delete"},
+		Short:   "Remove a model alias",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			alias, _ := cmd.Flags().GetString("alias")
+			if alias == "" {
+				return fmt.Errorf("--alias is required")
+			}
+			cfg, store, _, _, cleanup, err := bootstrap(cmd.Context(), *configPath)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			previous, err := store.DeleteModelRoute(cmd.Context(), alias)
+			if err != nil {
+				return err
+			}
+			if previous == nil {
+				return fmt.Errorf("model route %q not found", alias)
+			}
+			if err := syncModelPricing(cmd.Context(), store, cfg.PricingPath, previous, nil); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Removed %s -> %s (%s)\n", previous.Alias, previous.BedrockModelID, previous.Region)
+			return nil
+		},
+	}
+	removeCmd.Flags().String("alias", "", "proxy alias")
+	cmd.AddCommand(removeCmd)
 	cmd.AddCommand(&cobra.Command{
 		Use:   "list",
 		Short: "List model routes",
@@ -775,6 +812,41 @@ func seedPricing(ctx context.Context, store *db.Store, path string) error {
 		return err
 	}
 	return store.UpsertPricingEntries(ctx, rows)
+}
+
+func syncModelPricing(ctx context.Context, store *db.Store, path string, previous, current *domain.ModelRoute) error {
+	if current != nil {
+		entry, err := pricing.EnsureEntry(path, current.BedrockModelID, current.Region)
+		if err != nil {
+			return err
+		}
+		if err := store.UpsertPricingEntries(ctx, []domain.PricingEntry{*entry}); err != nil {
+			return err
+		}
+	}
+	if previous == nil {
+		return nil
+	}
+	if current != nil && previous.BedrockModelID == current.BedrockModelID && previous.Region == current.Region {
+		return nil
+	}
+	return removeUnusedPricingEntry(ctx, store, path, previous.BedrockModelID, previous.Region)
+}
+
+func removeUnusedPricingEntry(ctx context.Context, store *db.Store, path, modelID, region string) error {
+	routes, err := store.ListModelRoutes(ctx)
+	if err != nil {
+		return err
+	}
+	for _, route := range routes {
+		if route.BedrockModelID == modelID && route.Region == region {
+			return nil
+		}
+	}
+	if _, err := pricing.RemoveEntry(path, modelID, region); err != nil {
+		return err
+	}
+	return store.DeletePricingEntry(ctx, modelID, region)
 }
 
 func awsString(v *string) string {

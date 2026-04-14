@@ -14,6 +14,8 @@ import (
 //go:embed default_pricing.json
 var defaultPricing []byte
 
+const RouteDefaultVersion = "route-default"
+
 func DefaultCatalog() ([]domain.PricingEntry, error) {
 	return parse(defaultPricing)
 }
@@ -37,6 +39,75 @@ func EnsureFile(path string) error {
 		return fmt.Errorf("write pricing file: %w", err)
 	}
 	return nil
+}
+
+func SaveToFile(path string, rows []domain.PricingEntry) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir pricing dir: %w", err)
+	}
+	content, err := json.MarshalIndent(rows, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal pricing catalog: %w", err)
+	}
+	content = append(content, '\n')
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		return fmt.Errorf("write pricing file: %w", err)
+	}
+	return nil
+}
+
+func EnsureEntry(path, modelID, region string) (*domain.PricingEntry, error) {
+	if err := EnsureFile(path); err != nil {
+		return nil, err
+	}
+	rows, err := LoadFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		if rows[i].ModelID == modelID && rows[i].Region == region {
+			return &rows[i], nil
+		}
+	}
+	entry := domain.PricingEntry{
+		ModelID:          modelID,
+		Region:           region,
+		InputPerMTokens:  0,
+		OutputPerMTokens: 0,
+		Version:          RouteDefaultVersion,
+		UpdatedAt:        time.Now().UTC(),
+	}
+	rows = append(rows, entry)
+	if err := SaveToFile(path, rows); err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+func RemoveEntry(path, modelID, region string) (bool, error) {
+	if err := EnsureFile(path); err != nil {
+		return false, err
+	}
+	rows, err := LoadFromFile(path)
+	if err != nil {
+		return false, err
+	}
+	filtered := rows[:0]
+	removed := false
+	for _, row := range rows {
+		if row.ModelID == modelID && row.Region == region {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	if !removed {
+		return false, nil
+	}
+	if err := SaveToFile(path, filtered); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func parse(content []byte) ([]domain.PricingEntry, error) {

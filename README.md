@@ -376,7 +376,7 @@ broxy service restart
 
 ## Pricing and costs
 
-The generated pricing catalog starts with zero-valued placeholder entries. Edit the pricing file shown by `broxy config path`, then restart the service. Estimated costs are derived from token usage and that local pricing table.
+The generated pricing catalog starts empty. Adding a model route creates a zero-valued pricing entry for that Bedrock model and region; removing the final route for that pair removes the pricing entry. Edit the pricing file shown by `broxy config path`, then restart the service. Estimated costs are derived from token usage and that local pricing table.
 
 ## Development
 

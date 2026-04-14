@@ -103,6 +103,7 @@ func (s *Server) Router() http.Handler {
 			r.Put("/keys/{id}/limit", s.handleUpdateKeyLimit)
 			r.Get("/models", s.handleAdminModels)
 			r.Post("/models", s.handleCreateModel)
+			r.Delete("/models/{alias}", s.handleDeleteModel)
 			r.Get("/settings", s.handleSettings)
 			r.Get("/metrics", s.handlePromMetrics)
 		})
@@ -672,6 +673,11 @@ func (s *Server) handleCreateModel(w http.ResponseWriter, r *http.Request) {
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
+	previous, err := s.store.GetModelRoute(r.Context(), body.Alias)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	item, err := s.store.UpsertModelRoute(r.Context(), domain.ModelRoute{
 		Alias:              body.Alias,
 		BedrockModelID:     body.ModelID,
@@ -684,7 +690,64 @@ func (s *Server) handleCreateModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := s.syncModelPricing(r.Context(), previous, item); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"item": item})
+}
+
+func (s *Server) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
+	alias := chi.URLParam(r, "alias")
+	previous, err := s.store.DeleteModelRoute(r.Context(), alias)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if previous == nil {
+		writeError(w, http.StatusNotFound, "model route not found")
+		return
+	}
+	if err := s.syncModelPricing(r.Context(), previous, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) syncModelPricing(ctx context.Context, previous, current *domain.ModelRoute) error {
+	if current != nil {
+		entry, err := pricing.EnsureEntry(s.cfg.PricingPath, current.BedrockModelID, current.Region)
+		if err != nil {
+			return err
+		}
+		if err := s.store.UpsertPricingEntries(ctx, []domain.PricingEntry{*entry}); err != nil {
+			return err
+		}
+	}
+	if previous == nil {
+		return nil
+	}
+	if current != nil && previous.BedrockModelID == current.BedrockModelID && previous.Region == current.Region {
+		return nil
+	}
+	return s.removeUnusedPricingEntry(ctx, previous.BedrockModelID, previous.Region)
+}
+
+func (s *Server) removeUnusedPricingEntry(ctx context.Context, modelID, region string) error {
+	routes, err := s.store.ListModelRoutes(ctx)
+	if err != nil {
+		return err
+	}
+	for _, route := range routes {
+		if route.BedrockModelID == modelID && route.Region == region {
+			return nil
+		}
+	}
+	if _, err := pricing.RemoveEntry(s.cfg.PricingPath, modelID, region); err != nil {
+		return err
+	}
+	return s.store.DeletePricingEntry(ctx, modelID, region)
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {

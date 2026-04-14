@@ -318,6 +318,20 @@ func (s *Store) ListModelRoutes(ctx context.Context) ([]domain.ModelRoute, error
 	return items, nil
 }
 
+func (s *Store) DeleteModelRoute(ctx context.Context, alias string) (*domain.ModelRoute, error) {
+	item, err := s.GetModelRoute(ctx, alias)
+	if err != nil {
+		return nil, err
+	}
+	if item == nil {
+		return nil, nil
+	}
+	if _, err := s.db.ExecContext(ctx, `delete from model_routes where alias = ?`, alias); err != nil {
+		return nil, fmt.Errorf("delete model route: %w", err)
+	}
+	return item, nil
+}
+
 func (s *Store) UpsertPricingEntries(ctx context.Context, items []domain.PricingEntry) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -367,6 +381,13 @@ func (s *Store) GetPricingEntry(ctx context.Context, modelID, region string) (*d
 	}
 	item.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 	return &item, nil
+}
+
+func (s *Store) DeletePricingEntry(ctx context.Context, modelID, region string) error {
+	if _, err := s.db.ExecContext(ctx, `delete from pricing_entries where model_id = ? and region = ?`, modelID, region); err != nil {
+		return fmt.Errorf("delete pricing entry: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) CreateRequestLog(ctx context.Context, record domain.RequestRecord) error {

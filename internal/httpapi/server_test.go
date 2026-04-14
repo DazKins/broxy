@@ -17,10 +17,24 @@ import (
 	"github.com/personal/broxy/internal/db"
 	"github.com/personal/broxy/internal/domain"
 	"github.com/personal/broxy/internal/logging"
+	"github.com/personal/broxy/internal/pricing"
 	"github.com/personal/broxy/internal/security"
 )
 
 type fakeProvider struct{}
+
+func adminSessionCookie(t *testing.T, server *Server) *http.Cookie {
+	t.Helper()
+	value := map[string]string{
+		"username": "admin",
+		"exp":      time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano),
+	}
+	encoded, err := server.sessions.Encode("broxy_session", value)
+	if err != nil {
+		t.Fatalf("encode admin session: %v", err)
+	}
+	return &http.Cookie{Name: "broxy_session", Value: encoded}
+}
 
 func (fakeProvider) Converse(ctx context.Context, req domain.ConverseRequest) (*domain.ConverseResponse, error) {
 	return &domain.ConverseResponse{
@@ -1759,6 +1773,105 @@ func TestKeyUsageEndpoint(t *testing.T) {
 	}
 	if usage.TotalTokens != 20 {
 		t.Fatalf("total tokens = %d, want 20", usage.TotalTokens)
+	}
+}
+
+func TestAdminModelRoutesSyncPricingCatalog(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+	}
+	server := New(cfg, store, fakeProvider{}, "test")
+	router := server.Router()
+	cookie := adminSessionCookie(t, server)
+
+	postModel := func(alias string) {
+		t.Helper()
+		body := map[string]any{
+			"alias":    alias,
+			"model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+			"region":   "us-east-1",
+		}
+		payload, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/models", bytes.NewReader(payload))
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create model %q status = %d body=%s", alias, rec.Code, rec.Body.String())
+		}
+	}
+	deleteModel := func(alias string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodDelete, "/api/admin/models/"+alias, nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("delete model %q status = %d body=%s", alias, rec.Code, rec.Body.String())
+		}
+	}
+	loadPricing := func() []domain.PricingEntry {
+		t.Helper()
+		rows, err := pricing.LoadFromFile(cfg.PricingPath)
+		if err != nil {
+			t.Fatalf("LoadFromFile() error = %v", err)
+		}
+		return rows
+	}
+
+	postModel("alias-one")
+	entry, err := store.GetPricingEntry(context.Background(), "us.anthropic.claude-haiku-4-5-20251001-v1:0", "us-east-1")
+	if err != nil {
+		t.Fatalf("GetPricingEntry() error = %v", err)
+	}
+	if entry == nil {
+		t.Fatalf("pricing entry should exist after model create")
+	}
+	rows := loadPricing()
+	if len(rows) != 1 || rows[0].InputPerMTokens != 0 || rows[0].OutputPerMTokens != 0 {
+		t.Fatalf("pricing rows after create = %#v", rows)
+	}
+
+	postModel("alias-two")
+	rows = loadPricing()
+	if len(rows) != 1 {
+		t.Fatalf("shared model should not duplicate pricing rows: %#v", rows)
+	}
+
+	deleteModel("alias-one")
+	rows = loadPricing()
+	if len(rows) != 1 {
+		t.Fatalf("pricing row should remain while another route uses it: %#v", rows)
+	}
+	entry, err = store.GetPricingEntry(context.Background(), "us.anthropic.claude-haiku-4-5-20251001-v1:0", "us-east-1")
+	if err != nil {
+		t.Fatalf("GetPricingEntry() error = %v", err)
+	}
+	if entry == nil {
+		t.Fatalf("pricing entry should remain in db while another route uses it")
+	}
+
+	deleteModel("alias-two")
+	rows = loadPricing()
+	if len(rows) != 0 {
+		t.Fatalf("pricing row should be removed after final route delete: %#v", rows)
+	}
+	entry, err = store.GetPricingEntry(context.Background(), "us.anthropic.claude-haiku-4-5-20251001-v1:0", "us-east-1")
+	if err != nil {
+		t.Fatalf("GetPricingEntry() error = %v", err)
+	}
+	if entry != nil {
+		t.Fatalf("pricing entry should be removed from db: %#v", entry)
 	}
 }
 
