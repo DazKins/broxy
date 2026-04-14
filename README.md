@@ -209,7 +209,7 @@ model = "claude-opus-4.6"
 
 [model_providers.broxy]
 name = "Broxy"
-base_url = "http://127.0.0.1:8080/v1"
+base_url = "http://127.0.0.1:8080/v1" // replace with remote url if not using local broxy
 env_key = "BROXY_API_KEY"
 requires_openai_auth = false
 supports_websockets = false
@@ -262,7 +262,7 @@ Then create or update `~/.config/opencode/opencode.json` or a project-level `ope
       "npm": "@ai-sdk/openai",
       "name": "Broxy",
       "options": {
-        "baseURL": "http://127.0.0.1:8080/v1",
+        "baseURL": "http://127.0.0.1:8080/v1",  // replace with remote url if not using local broxy
         "apiKey": "{env:BROXY_API_KEY}"
       },
       "models": {
@@ -308,21 +308,48 @@ broxy apikey create --name claude-code
 Export that key in the shell where you start Claude Code:
 
 ```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
-export ANTHROPIC_AUTH_TOKEN="YOUR_PROXY_KEY"
-export ANTHROPIC_MODEL="claude-opus-4.6"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="us.anthropic.claude-haiku-4-5-20251001-v1:0"
-export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+export BROXY_API_KEY="YOUR_PROXY_KEY"
 ```
 
-Make sure each configured model is available as a Broxy model alias. For example:
+Then create or update your user-level `~/.claude/settings.json`:
+
+```json
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "claude-opus-4.6",
+  "apiKeyHelper": "test -n \"$BROXY_API_KEY\" && printf '%s' \"$BROXY_API_KEY\"",
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080", // replace with remote url if not using local broxy
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4.6",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4.6",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4.5",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1"
+  }
+}
+```
+
+For one project only, put the same JSON in `.claude/settings.local.json` instead.
+
+Make sure each configured model is available as a Broxy model alias:
 
 ```bash
 broxy models add \
   --alias claude-opus-4.6 \
   --model-id global.anthropic.claude-opus-4-6-v1 \
   --region us-east-1
+
+broxy models add \
+  --alias claude-sonnet-4.6 \
+  --model-id global.anthropic.claude-sonnet-4-6 \
+  --region us-east-1
+
+broxy models add \
+  --alias claude-haiku-4.5 \
+  --model-id global.anthropic.claude-haiku-4-5-20251001-v1:0 \
+  --region us-east-1
 ```
+
+Claude Code's `apiKeyHelper` reads the key from `BROXY_API_KEY`, while the `settings.json` `env` block applies the remaining gateway settings to Claude sessions without requiring extra shell exports.
 
 ## Bedrock authentication
 
