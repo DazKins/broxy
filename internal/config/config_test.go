@@ -6,30 +6,52 @@ import (
 	"testing"
 )
 
-func TestDefaultForPathUsesStateDirForCustomConfigPath(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "custom", "config.json")
-	cfg, err := DefaultForPath(configPath)
+func testBroxyRoot(t *testing.T) string {
+	t.Helper()
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	return filepath.Join(homeDir, ".broxy")
+}
+
+func TestDefaultForPathUsesBroxyRoot(t *testing.T) {
+	root := testBroxyRoot(t)
+
+	cfg, err := DefaultForPath("")
 	if err != nil {
 		t.Fatalf("DefaultForPath() error = %v", err)
 	}
 
-	baseDir := filepath.Dir(configPath)
-	if cfg.ConfigDir != baseDir {
-		t.Fatalf("ConfigDir = %q, want %q", cfg.ConfigDir, baseDir)
+	if cfg.ConfigDir != root {
+		t.Fatalf("ConfigDir = %q, want %q", cfg.ConfigDir, root)
 	}
-	if cfg.StateDir != filepath.Join(baseDir, "state") {
+	if cfg.StateDir != root {
 		t.Fatalf("StateDir = %q", cfg.StateDir)
 	}
-	if cfg.DBPath != filepath.Join(baseDir, "state", "broxy.db") {
+	if cfg.DBPath != filepath.Join(root, "broxy.db") {
 		t.Fatalf("DBPath = %q", cfg.DBPath)
+	}
+	if cfg.PricingPath != filepath.Join(root, "pricing.json") {
+		t.Fatalf("PricingPath = %q", cfg.PricingPath)
+	}
+}
+
+func TestConfigPathRejectsOutsideBroxyRoot(t *testing.T) {
+	testBroxyRoot(t)
+
+	if _, err := ConfigPath(filepath.Join(t.TempDir(), "config.json")); err == nil {
+		t.Fatalf("ConfigPath() error = nil, want outside root error")
 	}
 }
 
 func TestDefaultForPathUsesBearerModeWhenBearerEnvSet(t *testing.T) {
+	testBroxyRoot(t)
 	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "env-token")
 
-	configPath := filepath.Join(t.TempDir(), "custom", "config.json")
-	cfg, err := DefaultForPath(configPath)
+	cfg, err := DefaultForPath("")
 	if err != nil {
 		t.Fatalf("DefaultForPath() error = %v", err)
 	}
@@ -42,19 +64,19 @@ func TestDefaultForPathUsesBearerModeWhenBearerEnvSet(t *testing.T) {
 	}
 }
 
-func TestLoadMigratesLegacyDataDirAliasForCustomConfigPath(t *testing.T) {
-	baseDir := filepath.Join(t.TempDir(), "app")
-	configPath := filepath.Join(baseDir, "config.json")
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+func TestLoadIgnoresStoredPathFields(t *testing.T) {
+	root := testBroxyRoot(t)
+	configPath := filepath.Join(root, "config.json")
+	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
 
 	body := `{
   "listen_addr": "127.0.0.1:8080",
-  "config_dir": "` + baseDir + `",
-  "data_dir": "` + filepath.Join(baseDir, "data") + `",
-  "db_path": "` + filepath.Join(baseDir, "data", "broxy.db") + `",
-  "pricing_path": "` + filepath.Join(baseDir, "pricing.json") + `",
+  "config_dir": "/tmp/other-broxy",
+  "state_dir": "/tmp/other-broxy/state",
+  "db_path": "/tmp/other-broxy/state/broxy.db",
+  "pricing_path": "/tmp/other-broxy/pricing.json",
   "session_secret": "secret",
   "upstream": {
     "mode": "aws",
@@ -70,29 +92,35 @@ func TestLoadMigratesLegacyDataDirAliasForCustomConfigPath(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.StateDir != filepath.Join(baseDir, "state") {
+	if cfg.ConfigDir != root {
+		t.Fatalf("ConfigDir = %q", cfg.ConfigDir)
+	}
+	if cfg.StateDir != root {
 		t.Fatalf("StateDir = %q", cfg.StateDir)
 	}
-	if cfg.DBPath != filepath.Join(baseDir, "state", "broxy.db") {
+	if cfg.DBPath != filepath.Join(root, "broxy.db") {
 		t.Fatalf("DBPath = %q", cfg.DBPath)
+	}
+	if cfg.PricingPath != filepath.Join(root, "pricing.json") {
+		t.Fatalf("PricingPath = %q", cfg.PricingPath)
 	}
 }
 
 func TestLoadBearerTokenImpliesBearerMode(t *testing.T) {
+	root := testBroxyRoot(t)
 	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "")
 
-	baseDir := filepath.Join(t.TempDir(), "app")
-	configPath := filepath.Join(baseDir, "config.json")
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+	configPath := filepath.Join(root, "config.json")
+	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
 
 	body := `{
   "listen_addr": "127.0.0.1:8080",
-  "config_dir": "` + baseDir + `",
-  "state_dir": "` + filepath.Join(baseDir, "state") + `",
-  "db_path": "` + filepath.Join(baseDir, "state", "broxy.db") + `",
-  "pricing_path": "` + filepath.Join(baseDir, "pricing.json") + `",
+  "config_dir": "` + root + `",
+  "state_dir": "` + root + `",
+  "db_path": "` + filepath.Join(root, "broxy.db") + `",
+  "pricing_path": "` + filepath.Join(root, "pricing.json") + `",
   "session_secret": "secret",
   "upstream": {
     "mode": "aws",
@@ -118,23 +146,23 @@ func TestLoadBearerTokenImpliesBearerMode(t *testing.T) {
 }
 
 func TestLoadEnvBlockOverridesKnownEnvironmentSettings(t *testing.T) {
+	root := testBroxyRoot(t)
 	t.Setenv("AWS_REGION", "")
 	t.Setenv("AWS_DEFAULT_REGION", "")
 	t.Setenv("AWS_PROFILE", "")
 	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "")
 
-	baseDir := filepath.Join(t.TempDir(), "app")
-	configPath := filepath.Join(baseDir, "config.json")
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+	configPath := filepath.Join(root, "config.json")
+	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
 
 	body := `{
   "listen_addr": "127.0.0.1:8080",
-  "config_dir": "` + baseDir + `",
-  "state_dir": "` + filepath.Join(baseDir, "state") + `",
-  "db_path": "` + filepath.Join(baseDir, "state", "broxy.db") + `",
-  "pricing_path": "` + filepath.Join(baseDir, "pricing.json") + `",
+  "config_dir": "` + root + `",
+  "state_dir": "` + root + `",
+  "db_path": "` + filepath.Join(root, "broxy.db") + `",
+  "pricing_path": "` + filepath.Join(root, "pricing.json") + `",
   "session_secret": "secret",
   "upstream": {
     "mode": "aws",
@@ -191,9 +219,9 @@ func TestApplyEnvSetsArbitraryValues(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidEnvKey(t *testing.T) {
-	baseDir := filepath.Join(t.TempDir(), "app")
-	configPath := filepath.Join(baseDir, "config.json")
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+	root := testBroxyRoot(t)
+	configPath := filepath.Join(root, "config.json")
+	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
 
@@ -209,35 +237,5 @@ func TestLoadRejectsInvalidEnvKey(t *testing.T) {
 
 	if _, err := Load(configPath); err == nil {
 		t.Fatalf("Load() error = nil, want invalid env key")
-	}
-}
-
-func TestMigrateLegacyStateMovesDatabase(t *testing.T) {
-	baseDir := filepath.Join(t.TempDir(), "app")
-	configPath := filepath.Join(baseDir, "config.json")
-	cfg, err := DefaultForPath(configPath)
-	if err != nil {
-		t.Fatalf("DefaultForPath() error = %v", err)
-	}
-
-	legacyPaths, err := LegacyPathsForConfigPath(configPath)
-	if err != nil {
-		t.Fatalf("LegacyPathsForConfigPath() error = %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(legacyPaths.DBPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	if err := os.WriteFile(legacyPaths.DBPath, []byte("legacy"), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	if err := MigrateLegacyState(configPath, cfg); err != nil {
-		t.Fatalf("MigrateLegacyState() error = %v", err)
-	}
-	if _, err := os.Stat(cfg.DBPath); err != nil {
-		t.Fatalf("new db missing: %v", err)
-	}
-	if _, err := os.Stat(legacyPaths.DBPath); !os.IsNotExist(err) {
-		t.Fatalf("legacy db still exists, stat err=%v", err)
 	}
 }

@@ -34,7 +34,7 @@ func TestRenderLinuxService(t *testing.T) {
 }
 
 func TestRenderDarwinService(t *testing.T) {
-	cfg := &cfgpkg.Config{StateDir: filepath.Join("/Users/test", "Library", "Application Support", "broxy")}
+	cfg := &cfgpkg.Config{StateDir: filepath.Join("/Users/test", ".broxy")}
 	def, err := NewDefinition(
 		TargetDarwin,
 		cfg,

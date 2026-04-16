@@ -44,7 +44,7 @@ func NewRootCommand() *cobra.Command {
 		Use:   "broxy",
 		Short: "Standalone Bedrock proxy with OpenAI-compatible API, admin UI, and CLI",
 	}
-	cmd.PersistentFlags().StringVar(&configPath, "config", "", "config file path")
+	cmd.PersistentFlags().StringVar(&configPath, "config", "", "config file path inside ~/.broxy")
 	cmd.AddCommand(
 		newInitCommand(&configPath),
 		newServeCommand(&configPath),
@@ -757,9 +757,6 @@ func bootstrap(ctx context.Context, configPath string) (*cfgpkg.Config, *db.Stor
 		return nil, nil, nil, nil, nil, fmt.Errorf("load config %s: %w", path, err)
 	}
 	if err := cfgpkg.EnsureLayout(cfg); err != nil {
-		return nil, nil, nil, nil, nil, err
-	}
-	if err := cfgpkg.MigrateLegacyState(path, cfg); err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
 	if err := cfgpkg.ApplyEnv(cfg.Env); err != nil {

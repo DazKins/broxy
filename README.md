@@ -46,30 +46,21 @@ The installer:
 4. installs the background service
 5. starts or restarts the service
 
-Override examples:
+Version override:
 
 ```bash
 BROXY_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/DazKins/broxy/main/scripts/install.sh | sh
-BROXY_CONFIG_PATH="$HOME/.broxy-dev/config.json" curl -fsSL https://raw.githubusercontent.com/DazKins/broxy/main/scripts/install.sh | sh
 ```
 
 ## Default paths
 
-Linux:
+Broxy stores all app-owned files under `~/.broxy/` on every platform:
 
-- config: `${XDG_CONFIG_HOME:-~/.config}/broxy/config.json`
-- pricing: `${XDG_CONFIG_HOME:-~/.config}/broxy/pricing.json`
-- state: `${XDG_STATE_HOME:-~/.local/state}/broxy/`
-- database: `${XDG_STATE_HOME:-~/.local/state}/broxy/broxy.db`
-- logs: `${XDG_STATE_HOME:-~/.local/state}/broxy/logs/`
-
-macOS:
-
-- root: `~/Library/Application Support/broxy/`
-- config: `~/Library/Application Support/broxy/config.json`
-- pricing: `~/Library/Application Support/broxy/pricing.json`
-- database: `~/Library/Application Support/broxy/broxy.db`
-- logs: `~/Library/Application Support/broxy/logs/`
+- root: `~/.broxy/`
+- config: `~/.broxy/config.json`
+- pricing: `~/.broxy/pricing.json`
+- database: `~/.broxy/broxy.db`
+- logs: `~/.broxy/logs/`
 
 Inspect the effective paths on any machine:
 

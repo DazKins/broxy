@@ -3,7 +3,6 @@ set -eu
 
 REPO="${BROXY_INSTALL_REPO:-DazKins/broxy}"
 INSTALL_BIN_DIR="${BROXY_INSTALL_BIN_DIR:-$HOME/.local/bin}"
-CONFIG_PATH="${BROXY_CONFIG_PATH:-}"
 VERSION="${BROXY_VERSION:-}"
 
 detect_os() {
@@ -85,11 +84,7 @@ ensure_path_entry() {
 }
 
 run_broxy() {
-  if [ -n "$CONFIG_PATH" ]; then
-    "$INSTALL_BIN_DIR/broxy" --config "$CONFIG_PATH" "$@"
-  else
-    "$INSTALL_BIN_DIR/broxy" "$@"
-  fi
+  "$INSTALL_BIN_DIR/broxy" "$@"
 }
 
 OS="$(detect_os)"

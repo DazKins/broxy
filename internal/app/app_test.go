@@ -10,8 +10,19 @@ import (
 	cfgpkg "github.com/personal/broxy/internal/config"
 )
 
+func testBroxyHome(t *testing.T) string {
+	t.Helper()
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	return filepath.Join(homeDir, ".broxy")
+}
+
 func TestInitCommandJSON(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "broxy", "config.json")
+	root := testBroxyHome(t)
+	configPath := filepath.Join(root, "config.json")
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 
@@ -30,8 +41,11 @@ func TestInitCommandJSON(t *testing.T) {
 	if payload["config_path"] != configPath {
 		t.Fatalf("config_path = %q, want %q", payload["config_path"], configPath)
 	}
-	if payload["state_dir"] != filepath.Join(filepath.Dir(configPath), "state") {
+	if payload["state_dir"] != root {
 		t.Fatalf("state_dir = %q", payload["state_dir"])
+	}
+	if payload["db_path"] != filepath.Join(root, "broxy.db") {
+		t.Fatalf("db_path = %q", payload["db_path"])
 	}
 	if payload["admin_password"] == "" {
 		t.Fatalf("admin_password should be set")
@@ -39,14 +53,14 @@ func TestInitCommandJSON(t *testing.T) {
 }
 
 func TestConfigPathCommandJSON(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "broxy", "config.json")
+	root := testBroxyHome(t)
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 
 	cmd := NewRootCommand()
 	cmd.SetOut(stdout)
 	cmd.SetErr(stderr)
-	cmd.SetArgs([]string{"--config", configPath, "config", "path", "--json"})
+	cmd.SetArgs([]string{"config", "path", "--json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v stderr=%s", err, stderr.String())
 	}
@@ -55,13 +69,17 @@ func TestConfigPathCommandJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v body=%s", err, stdout.String())
 	}
-	if payload["db_path"] != filepath.Join(filepath.Dir(configPath), "state", "broxy.db") {
+	if payload["config_path"] != filepath.Join(root, "config.json") {
+		t.Fatalf("config_path = %q", payload["config_path"])
+	}
+	if payload["db_path"] != filepath.Join(root, "broxy.db") {
 		t.Fatalf("db_path = %q", payload["db_path"])
 	}
 }
 
 func TestServiceInstallDryRun(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "broxy", "config.json")
+	root := testBroxyHome(t)
+	configPath := filepath.Join(root, "config.json")
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 
@@ -81,7 +99,8 @@ func TestServiceInstallDryRun(t *testing.T) {
 }
 
 func TestServiceInstallDryRunIncludesConfigEnv(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "broxy", "config.json")
+	root := testBroxyHome(t)
+	configPath := filepath.Join(root, "config.json")
 	cfg, err := cfgpkg.DefaultForPath(configPath)
 	if err != nil {
 		t.Fatalf("DefaultForPath() error = %v", err)
