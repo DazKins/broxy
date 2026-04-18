@@ -13,6 +13,8 @@ type UpstreamAuthMode string
 const (
 	UpstreamAuthAWS    UpstreamAuthMode = "aws"
 	UpstreamAuthBearer UpstreamAuthMode = "bearer"
+
+	DefaultListenAddr = "127.0.0.1:27699"
 )
 
 type UpstreamConfig struct {
@@ -109,7 +111,7 @@ func DefaultForPath(path string) (*Config, error) {
 		mode = UpstreamAuthBearer
 	}
 	return &Config{
-		ListenAddr:  "127.0.0.1:8080",
+		ListenAddr:  DefaultListenAddr,
 		ConfigDir:   paths.ConfigDir,
 		StateDir:    paths.StateDir,
 		DBPath:      paths.DBPath,
@@ -233,7 +235,7 @@ func applyDefaults(cfg *Config, path string) error {
 		return err
 	}
 	if cfg.ListenAddr == "" {
-		cfg.ListenAddr = "127.0.0.1:8080"
+		cfg.ListenAddr = DefaultListenAddr
 	}
 	cfg.ConfigDir = defaultPaths.ConfigDir
 	cfg.StateDir = defaultPaths.StateDir

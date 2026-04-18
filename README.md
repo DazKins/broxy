@@ -133,7 +133,7 @@ broxy models add \
 Send a request through the proxy:
 
 ```bash
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl http://127.0.0.1:27699/v1/chat/completions \
   -H "Authorization: Bearer YOUR_PROXY_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -145,7 +145,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 Responses API example:
 
 ```bash
-curl http://127.0.0.1:8080/v1/responses \
+curl http://127.0.0.1:27699/v1/responses \
   -H "Authorization: Bearer YOUR_PROXY_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -175,7 +175,7 @@ Currently unsupported:
 - multimodal tool outputs
 - persisted response storage beyond the running server process
 
-Log into the admin UI at `http://127.0.0.1:8080/` with the generated `admin` password.
+Log into the admin UI at `http://127.0.0.1:27699/` with the generated `admin` password.
 
 ## Using Broxy with Codex
 
@@ -200,7 +200,7 @@ model = "claude-opus-4.6"
 
 [model_providers.broxy]
 name = "Broxy"
-base_url = "http://127.0.0.1:8080/v1" // replace with remote url if not using local broxy
+base_url = "http://127.0.0.1:27699/v1" // replace with remote url if not using local broxy
 env_key = "BROXY_API_KEY"
 requires_openai_auth = false
 supports_websockets = false
@@ -253,7 +253,7 @@ Then create or update `~/.config/opencode/opencode.json` or a project-level `ope
       "npm": "@ai-sdk/openai",
       "name": "Broxy",
       "options": {
-        "baseURL": "http://127.0.0.1:8080/v1",  // replace with remote url if not using local broxy
+        "baseURL": "http://127.0.0.1:27699/v1",  // replace with remote url if not using local broxy
         "apiKey": "{env:BROXY_API_KEY}"
       },
       "models": {
@@ -310,7 +310,7 @@ Then create or update your user-level `~/.claude/settings.json`:
   "model": "claude-opus-4.6",
   "apiKeyHelper": "test -n \"$BROXY_API_KEY\" && printf '%s' \"$BROXY_API_KEY\"",
   "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080", // replace with remote url if not using local broxy
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:27699", // replace with remote url if not using local broxy
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4.6",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4.6",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4.5",
@@ -344,25 +344,40 @@ Claude Code's `apiKeyHelper` reads the key from `BROXY_API_KEY`, while the `sett
 
 ## Bedrock authentication
 
+Configure Bedrock in the generated config file shown by `broxy config path`.
+The relevant settings live under the `upstream` block.
+
 ### AWS credential chain
 
-Default mode uses the standard AWS SDK chain:
+Default mode uses the standard AWS SDK chain. Put the Broxy-specific region and
+profile selection in config:
 
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
-- shared credentials and config files
-- `AWS_PROFILE`
-- SSO / instance or task roles
+```json
+{
+  "upstream": {
+    "mode": "aws",
+    "region": "us-east-1",
+    "profile": "sso-prod"
+  }
+}
+```
 
-Set `AWS_REGION` or `AWS_DEFAULT_REGION`, or edit the generated config file.
+Use the normal AWS shared credentials/config files, SSO, credential process,
+instance roles, or task roles for the selected profile. Do not store long-lived
+AWS access keys in Broxy config.
 
 ### Bearer token mode
 
-You can set bearer mode in config or through environment variables:
+Set bearer mode directly in the same config file:
 
-```bash
-export AWS_BEARER_TOKEN_BEDROCK=...
-export BEDROCK_PROXY_BEDROCK_REGION=us-east-1
-broxy service restart
+```json
+{
+  "upstream": {
+    "mode": "bearer",
+    "region": "us-east-1",
+    "bearer_token": "..."
+  }
+}
 ```
 
 ## Pricing and costs

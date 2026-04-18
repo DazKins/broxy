@@ -37,6 +37,9 @@ func TestDefaultForPathUsesBroxyRoot(t *testing.T) {
 	if cfg.PricingPath != filepath.Join(root, "pricing.json") {
 		t.Fatalf("PricingPath = %q", cfg.PricingPath)
 	}
+	if cfg.ListenAddr != DefaultListenAddr {
+		t.Fatalf("ListenAddr = %q, want %q", cfg.ListenAddr, DefaultListenAddr)
+	}
 }
 
 func TestConfigPathRejectsOutsideBroxyRoot(t *testing.T) {
@@ -72,7 +75,7 @@ func TestLoadIgnoresStoredPathFields(t *testing.T) {
 	}
 
 	body := `{
-  "listen_addr": "127.0.0.1:8080",
+  "listen_addr": "127.0.0.1:27699",
   "config_dir": "/tmp/other-broxy",
   "state_dir": "/tmp/other-broxy/state",
   "db_path": "/tmp/other-broxy/state/broxy.db",
@@ -116,7 +119,7 @@ func TestLoadBearerTokenImpliesBearerMode(t *testing.T) {
 	}
 
 	body := `{
-  "listen_addr": "127.0.0.1:8080",
+  "listen_addr": "127.0.0.1:27699",
   "config_dir": "` + root + `",
   "state_dir": "` + root + `",
   "db_path": "` + filepath.Join(root, "broxy.db") + `",
@@ -158,7 +161,7 @@ func TestLoadEnvBlockOverridesKnownEnvironmentSettings(t *testing.T) {
 	}
 
 	body := `{
-  "listen_addr": "127.0.0.1:8080",
+  "listen_addr": "127.0.0.1:27699",
   "config_dir": "` + root + `",
   "state_dir": "` + root + `",
   "db_path": "` + filepath.Join(root, "broxy.db") + `",
@@ -226,7 +229,7 @@ func TestLoadRejectsInvalidEnvKey(t *testing.T) {
 	}
 
 	body := `{
-  "listen_addr": "127.0.0.1:8080",
+  "listen_addr": "127.0.0.1:27699",
   "env": {
     "BAD=KEY": "value"
   }
