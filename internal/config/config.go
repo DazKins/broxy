@@ -25,6 +25,16 @@ type UpstreamConfig struct {
 	EndpointOverride string           `json:"endpoint_override,omitempty"`
 }
 
+type SearchConfig struct {
+	Provider       string `json:"provider,omitempty"`
+	BraveAPIKey    string `json:"brave_api_key,omitempty"`
+	Endpoint       string `json:"endpoint,omitempty"`
+	MaxResults     int    `json:"max_results,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+	Country        string `json:"country,omitempty"`
+	SearchLang     string `json:"search_lang,omitempty"`
+}
+
 type Config struct {
 	ListenAddr    string            `json:"listen_addr"`
 	ConfigDir     string            `json:"config_dir"`
@@ -33,6 +43,7 @@ type Config struct {
 	SessionSecret string            `json:"session_secret"`
 	PricingPath   string            `json:"pricing_path"`
 	Upstream      UpstreamConfig    `json:"upstream"`
+	Search        SearchConfig      `json:"search,omitempty"`
 	Env           map[string]string `json:"env"`
 }
 
@@ -53,6 +64,7 @@ type fileConfig struct {
 	SessionSecret string            `json:"session_secret"`
 	PricingPath   string            `json:"pricing_path"`
 	Upstream      UpstreamConfig    `json:"upstream"`
+	Search        SearchConfig      `json:"search,omitempty"`
 	Env           map[string]string `json:"env"`
 }
 
@@ -180,6 +192,7 @@ func Save(path string, cfg *Config) error {
 		SessionSecret: cfg.SessionSecret,
 		PricingPath:   cfg.PricingPath,
 		Upstream:      cfg.Upstream,
+		Search:        cfg.Search,
 		Env:           cloneEnv(cfg.Env),
 	}, "", "  ")
 	if err != nil {
@@ -222,6 +235,7 @@ func applyFileConfig(cfg *Config, path string, raw fileConfig) error {
 		cfg.SessionSecret = raw.SessionSecret
 	}
 	cfg.Upstream = mergeUpstream(cfg.Upstream, raw.Upstream)
+	cfg.Search = mergeSearch(cfg.Search, raw.Search)
 	if raw.Env != nil {
 		cfg.Env = cloneEnv(raw.Env)
 	}
@@ -256,6 +270,15 @@ func applyDefaults(cfg *Config, path string) error {
 	if cfg.Upstream.Region == "" {
 		cfg.Upstream.Region = envDefault("AWS_REGION", envDefault("AWS_DEFAULT_REGION", "us-east-1"))
 	}
+	if cfg.Search.Provider == "" && cfg.Search.BraveAPIKey != "" {
+		cfg.Search.Provider = "brave"
+	}
+	if cfg.Search.MaxResults <= 0 {
+		cfg.Search.MaxResults = 5
+	}
+	if cfg.Search.TimeoutSeconds <= 0 {
+		cfg.Search.TimeoutSeconds = 10
+	}
 	return nil
 }
 
@@ -275,6 +298,32 @@ func mergeUpstream(defaults, overrides UpstreamConfig) UpstreamConfig {
 	}
 	if overrides.EndpointOverride != "" {
 		out.EndpointOverride = overrides.EndpointOverride
+	}
+	return out
+}
+
+func mergeSearch(defaults, overrides SearchConfig) SearchConfig {
+	out := defaults
+	if overrides.Provider != "" {
+		out.Provider = overrides.Provider
+	}
+	if overrides.BraveAPIKey != "" {
+		out.BraveAPIKey = overrides.BraveAPIKey
+	}
+	if overrides.Endpoint != "" {
+		out.Endpoint = overrides.Endpoint
+	}
+	if overrides.MaxResults != 0 {
+		out.MaxResults = overrides.MaxResults
+	}
+	if overrides.TimeoutSeconds != 0 {
+		out.TimeoutSeconds = overrides.TimeoutSeconds
+	}
+	if overrides.Country != "" {
+		out.Country = overrides.Country
+	}
+	if overrides.SearchLang != "" {
+		out.SearchLang = overrides.SearchLang
 	}
 	return out
 }

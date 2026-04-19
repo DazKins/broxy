@@ -13,6 +13,7 @@ import (
 
 	"github.com/personal/broxy/internal/domain"
 	"github.com/personal/broxy/internal/pricing"
+	searchpkg "github.com/personal/broxy/internal/search"
 )
 
 type AnthropicMessagesRequest struct {
@@ -34,10 +35,13 @@ type anthropicMessage struct {
 }
 
 type anthropicTool struct {
-	Type        string          `json:"type,omitempty"`
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	Type           string          `json:"type,omitempty"`
+	Name           string          `json:"name"`
+	Description    string          `json:"description,omitempty"`
+	InputSchema    json.RawMessage `json:"input_schema,omitempty"`
+	MaxUses        int             `json:"max_uses,omitempty"`
+	AllowedDomains []string        `json:"allowed_domains,omitempty"`
+	BlockedDomains []string        `json:"blocked_domains,omitempty"`
 }
 
 type normalizedAnthropicMessagesRequest struct {
@@ -45,6 +49,13 @@ type normalizedAnthropicMessagesRequest struct {
 	System     []string
 	Tools      []domain.ToolDefinition
 	ToolChoice *domain.ToolChoice
+	WebSearch  *anthropicWebSearchConfig
+}
+
+type anthropicWebSearchConfig struct {
+	MaxUses        int
+	AllowedDomains []string
+	BlockedDomains []string
 }
 
 func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
@@ -121,8 +132,9 @@ func (s *Server) processAnthropicMessagesRequest(ctx context.Context, apiKey *do
 	if normalized.ToolChoice != nil && normalized.ToolChoice.Type == "none" {
 		converseReq.Tools = nil
 		converseReq.ToolChoice = nil
+		normalized.WebSearch = nil
 	}
-	upstreamResp, err := s.provider.Converse(ctx, converseReq)
+	upstreamResp, err := s.completeAnthropicMessages(ctx, converseReq, normalized.WebSearch)
 	finishedAt := time.Now().UTC()
 	if err != nil {
 		statusCode := upstreamStatusCode(err)
@@ -172,6 +184,109 @@ func (s *Server) processAnthropicMessagesRequest(ctx context.Context, apiKey *do
 	return buildAnthropicMessageEnvelope(req.Model, upstreamResp), http.StatusOK, nil
 }
 
+func (s *Server) completeAnthropicMessages(ctx context.Context, req domain.ConverseRequest, webSearch *anthropicWebSearchConfig) (*domain.ConverseResponse, error) {
+	if webSearch == nil {
+		return s.provider.Converse(ctx, req)
+	}
+	if s.search == nil {
+		message := unconfiguredAnthropicWebSearchMessage()
+		return &domain.ConverseResponse{
+			ModelID: req.ModelID,
+			Text:    message,
+			Message: domain.BedrockChatMessage{
+				Role: "assistant",
+				Blocks: []domain.BedrockContentBlock{{
+					Type: "text",
+					Text: message,
+				}},
+			},
+			StopReason: "end_turn",
+		}, nil
+	}
+
+	req.Tools = append([]domain.ToolDefinition{anthropicWebSearchToolDefinition()}, req.Tools...)
+	if req.ToolChoice == nil {
+		req.ToolChoice = &domain.ToolChoice{Type: "auto"}
+	}
+	maxUses := webSearch.MaxUses
+	if maxUses <= 0 {
+		maxUses = 5
+	}
+	var totalUsage domain.TokenUsage
+	var totalLatency int64
+	searchUses := 0
+	for turns := 0; turns < maxUses+2; turns++ {
+		resp, err := s.provider.Converse(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		totalUsage.Input += resp.Usage.Input
+		totalUsage.Output += resp.Usage.Output
+		totalUsage.Total += resp.Usage.Total
+		totalLatency += resp.LatencyMS
+
+		webToolUses, hasOtherToolUse := anthropicWebSearchToolUses(resp.Message.Blocks)
+		if len(webToolUses) == 0 || hasOtherToolUse {
+			resp.Usage = totalUsage
+			resp.LatencyMS = totalLatency
+			return resp, nil
+		}
+
+		req.Messages = append(req.Messages, resp.Message)
+		resultBlocks := make([]domain.BedrockContentBlock, 0, len(webToolUses))
+		for _, block := range webToolUses {
+			if searchUses >= maxUses {
+				resultBlocks = append(resultBlocks, anthropicWebSearchErrorResult(block.ToolUseID, "max_uses_exceeded"))
+				continue
+			}
+			searchUses++
+			resultBlocks = append(resultBlocks, s.runAnthropicWebSearch(ctx, block, webSearch))
+		}
+		req.Messages = append(req.Messages, domain.BedrockChatMessage{
+			Role:   "user",
+			Blocks: resultBlocks,
+		})
+	}
+	message := "Web search stopped because the model exceeded Broxy's web search turn limit."
+	return &domain.ConverseResponse{
+		ModelID: req.ModelID,
+		Text:    message,
+		Message: domain.BedrockChatMessage{
+			Role: "assistant",
+			Blocks: []domain.BedrockContentBlock{{
+				Type: "text",
+				Text: message,
+			}},
+		},
+		StopReason: "end_turn",
+		Usage:      totalUsage,
+		LatencyMS:  totalLatency,
+	}, nil
+}
+
+func (s *Server) runAnthropicWebSearch(ctx context.Context, block domain.BedrockContentBlock, cfg *anthropicWebSearchConfig) domain.BedrockContentBlock {
+	query, err := anthropicWebSearchQuery(block.ToolInput)
+	if err != nil {
+		return anthropicWebSearchErrorResult(block.ToolUseID, err.Error())
+	}
+	resp, err := s.search.Search(ctx, searchpkg.Request{
+		Query:          query,
+		AllowedDomains: cfg.AllowedDomains,
+		BlockedDomains: cfg.BlockedDomains,
+	})
+	if err != nil {
+		return anthropicWebSearchErrorResult(block.ToolUseID, err.Error())
+	}
+	return domain.BedrockContentBlock{
+		Type:      "tool_result",
+		ToolUseID: block.ToolUseID,
+		ToolResult: []domain.ToolResultContent{{
+			Type: "text",
+			Text: searchpkg.FormatResponse(resp),
+		}},
+	}
+}
+
 func normalizeAnthropicMessagesRequest(req AnthropicMessagesRequest) (*normalizedAnthropicMessagesRequest, error) {
 	system, err := parseAnthropicSystem(req.System)
 	if err != nil {
@@ -193,11 +308,11 @@ func normalizeAnthropicMessagesRequest(req AnthropicMessagesRequest) (*normalize
 	if err != nil {
 		return nil, err
 	}
-	tools, err := parseAnthropicTools(req.Tools)
+	tools, webSearch, err := parseAnthropicTools(req.Tools)
 	if err != nil {
 		return nil, err
 	}
-	choice, err := parseAnthropicToolChoice(req.ToolChoice, len(tools) > 0)
+	choice, err := parseAnthropicToolChoice(req.ToolChoice, len(tools) > 0 || webSearch != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -206,6 +321,7 @@ func normalizeAnthropicMessagesRequest(req AnthropicMessagesRequest) (*normalize
 		System:     system,
 		Tools:      tools,
 		ToolChoice: choice,
+		WebSearch:  webSearch,
 	}, nil
 }
 
@@ -332,14 +448,26 @@ func parseAnthropicToolResultContent(raw json.RawMessage) ([]domain.ToolResultCo
 	return content, nil
 }
 
-func parseAnthropicTools(tools []anthropicTool) ([]domain.ToolDefinition, error) {
+func parseAnthropicTools(tools []anthropicTool) ([]domain.ToolDefinition, *anthropicWebSearchConfig, error) {
 	defs := make([]domain.ToolDefinition, 0, len(tools))
+	var webSearch *anthropicWebSearchConfig
 	for _, tool := range tools {
+		if isAnthropicWebSearchToolType(tool.Type) {
+			if webSearch == nil {
+				webSearch = &anthropicWebSearchConfig{}
+			}
+			if tool.MaxUses > 0 {
+				webSearch.MaxUses = tool.MaxUses
+			}
+			webSearch.AllowedDomains = append(webSearch.AllowedDomains, tool.AllowedDomains...)
+			webSearch.BlockedDomains = append(webSearch.BlockedDomains, tool.BlockedDomains...)
+			continue
+		}
 		if tool.Type != "" && tool.Type != "custom" {
-			return nil, fmt.Errorf("unsupported tool type %q", tool.Type)
+			return nil, nil, fmt.Errorf("unsupported tool type %q", tool.Type)
 		}
 		if strings.TrimSpace(tool.Name) == "" {
-			return nil, errors.New("tool name is required")
+			return nil, nil, errors.New("tool name is required")
 		}
 		defs = append(defs, domain.ToolDefinition{
 			Name:        tool.Name,
@@ -347,7 +475,66 @@ func parseAnthropicTools(tools []anthropicTool) ([]domain.ToolDefinition, error)
 			Parameters:  nonEmptyJSON(tool.InputSchema, []byte(`{"type":"object","properties":{}}`)),
 		})
 	}
-	return defs, nil
+	return defs, webSearch, nil
+}
+
+func isAnthropicWebSearchToolType(toolType string) bool {
+	toolType = strings.TrimSpace(toolType)
+	return toolType == "web_search" || strings.HasPrefix(toolType, "web_search_")
+}
+
+func anthropicWebSearchToolDefinition() domain.ToolDefinition {
+	return domain.ToolDefinition{
+		Name:        "web_search",
+		Description: "Search the web for current information. Use this when answering requires up-to-date or source-backed information.",
+		Parameters:  []byte(`{"type":"object","properties":{"query":{"type":"string","description":"Search query to send to the web search provider."}},"required":["query"],"additionalProperties":false}`),
+	}
+}
+
+func anthropicWebSearchToolUses(blocks []domain.BedrockContentBlock) ([]domain.BedrockContentBlock, bool) {
+	var web []domain.BedrockContentBlock
+	var other bool
+	for _, block := range blocks {
+		if block.Type != "tool_use" {
+			continue
+		}
+		if block.ToolName == "web_search" {
+			web = append(web, block)
+			continue
+		}
+		other = true
+	}
+	return web, other
+}
+
+func anthropicWebSearchQuery(raw json.RawMessage) (string, error) {
+	var input struct {
+		Query string `json:"query"`
+		Q     string `json:"q"`
+	}
+	if err := json.Unmarshal(nonEmptyJSON(raw, []byte(`{}`)), &input); err != nil {
+		return "", fmt.Errorf("invalid web_search input: %w", err)
+	}
+	query := strings.TrimSpace(input.Query)
+	if query == "" {
+		query = strings.TrimSpace(input.Q)
+	}
+	if query == "" {
+		return "", errors.New("web_search query is required")
+	}
+	return query, nil
+}
+
+func anthropicWebSearchErrorResult(toolUseID string, message string) domain.BedrockContentBlock {
+	return domain.BedrockContentBlock{
+		Type:             "tool_result",
+		ToolUseID:        toolUseID,
+		ToolResultStatus: "error",
+		ToolResult: []domain.ToolResultContent{{
+			Type: "text",
+			Text: message,
+		}},
+	}
 }
 
 func parseAnthropicToolChoice(raw json.RawMessage, hasTools bool) (*domain.ToolChoice, error) {
@@ -396,6 +583,10 @@ func buildAnthropicMessageEnvelope(model string, resp *domain.ConverseResponse) 
 			"output_tokens": resp.Usage.Output,
 		},
 	}
+}
+
+func unconfiguredAnthropicWebSearchMessage() string {
+	return "Broxy is being used as an AWS Bedrock proxy. Claude Code requested web search, but no Broxy search provider is configured. Add a search block to the Broxy config with provider \"brave\" and your Brave Search API key, then retry."
 }
 
 func buildAnthropicContent(resp *domain.ConverseResponse) []map[string]any {

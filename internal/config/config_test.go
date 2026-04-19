@@ -148,6 +148,55 @@ func TestLoadBearerTokenImpliesBearerMode(t *testing.T) {
 	}
 }
 
+func TestLoadSearchConfig(t *testing.T) {
+	root := testBroxyRoot(t)
+	configPath := filepath.Join(root, "config.json")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	body := `{
+  "listen_addr": "127.0.0.1:27699",
+  "session_secret": "secret",
+  "search": {
+    "provider": "brave",
+    "brave_api_key": "brave-token",
+    "endpoint": "https://example.test/search",
+    "max_results": 7,
+    "timeout_seconds": 3,
+    "country": "us",
+    "search_lang": "en"
+  }
+}`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Search.Provider != "brave" {
+		t.Fatalf("Search.Provider = %q", cfg.Search.Provider)
+	}
+	if cfg.Search.BraveAPIKey != "brave-token" {
+		t.Fatalf("Search.BraveAPIKey = %q", cfg.Search.BraveAPIKey)
+	}
+	if cfg.Search.Endpoint != "https://example.test/search" {
+		t.Fatalf("Search.Endpoint = %q", cfg.Search.Endpoint)
+	}
+	if cfg.Search.MaxResults != 7 {
+		t.Fatalf("Search.MaxResults = %d", cfg.Search.MaxResults)
+	}
+	if cfg.Search.TimeoutSeconds != 3 {
+		t.Fatalf("Search.TimeoutSeconds = %d", cfg.Search.TimeoutSeconds)
+	}
+	if cfg.Search.Country != "us" || cfg.Search.SearchLang != "en" {
+		t.Fatalf("Search locale = %#v", cfg.Search)
+	}
+}
+
 func TestLoadEnvBlockOverridesKnownEnvironmentSettings(t *testing.T) {
 	root := testBroxyRoot(t)
 	t.Setenv("AWS_REGION", "")

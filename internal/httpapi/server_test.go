@@ -18,6 +18,7 @@ import (
 	"github.com/personal/broxy/internal/domain"
 	"github.com/personal/broxy/internal/logging"
 	"github.com/personal/broxy/internal/pricing"
+	searchpkg "github.com/personal/broxy/internal/search"
 	"github.com/personal/broxy/internal/security"
 )
 
@@ -82,6 +83,16 @@ type mixedToolProvider struct {
 
 type errorProvider struct {
 	err error
+}
+
+type webSearchProvider struct {
+	mu       sync.Mutex
+	requests []domain.ConverseRequest
+}
+
+type fakeSearchProvider struct {
+	mu       sync.Mutex
+	requests []searchpkg.Request
 }
 
 func (p errorProvider) Converse(ctx context.Context, req domain.ConverseRequest) (*domain.ConverseResponse, error) {
@@ -207,6 +218,75 @@ func (p *mixedToolProvider) Requests() []domain.ConverseRequest {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	items := make([]domain.ConverseRequest, len(p.requests))
+	copy(items, p.requests)
+	return items
+}
+
+func (p *webSearchProvider) Converse(ctx context.Context, req domain.ConverseRequest) (*domain.ConverseResponse, error) {
+	p.mu.Lock()
+	p.requests = append(p.requests, req)
+	p.mu.Unlock()
+
+	if hasToolResult(req.Messages) {
+		return &domain.ConverseResponse{
+			ModelID: req.ModelID,
+			Text:    "Brave found the answer at https://example.com/result",
+			Message: domain.BedrockChatMessage{
+				Role: "assistant",
+				Blocks: []domain.BedrockContentBlock{{
+					Type: "text",
+					Text: "Brave found the answer at https://example.com/result",
+				}},
+			},
+			StopReason: "end_turn",
+			Usage:      domain.TokenUsage{Input: 30, Output: 8, Total: 38},
+			LatencyMS:  50,
+		}, nil
+	}
+
+	return &domain.ConverseResponse{
+		ModelID: req.ModelID,
+		Message: domain.BedrockChatMessage{
+			Role: "assistant",
+			Blocks: []domain.BedrockContentBlock{{
+				Type:      "tool_use",
+				ToolUseID: "web_search_1",
+				ToolName:  "web_search",
+				ToolInput: []byte(`{"query":"broxy web search"}`),
+			}},
+		},
+		StopReason: "tool_use",
+		Usage:      domain.TokenUsage{Input: 20, Output: 10, Total: 30},
+		LatencyMS:  40,
+	}, nil
+}
+
+func (p *webSearchProvider) Requests() []domain.ConverseRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	items := make([]domain.ConverseRequest, len(p.requests))
+	copy(items, p.requests)
+	return items
+}
+
+func (p *fakeSearchProvider) Search(ctx context.Context, req searchpkg.Request) (*searchpkg.Response, error) {
+	p.mu.Lock()
+	p.requests = append(p.requests, req)
+	p.mu.Unlock()
+	return &searchpkg.Response{
+		Query: req.Query,
+		Results: []searchpkg.Result{{
+			Title:       "Broxy result",
+			URL:         "https://example.com/result",
+			Description: "A result from Brave.",
+		}},
+	}, nil
+}
+
+func (p *fakeSearchProvider) Requests() []searchpkg.Request {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	items := make([]searchpkg.Request, len(p.requests))
 	copy(items, p.requests)
 	return items
 }
@@ -2169,6 +2249,159 @@ func TestAnthropicMessagesProxyToolCall(t *testing.T) {
 	}
 	if requests[0].ToolChoice == nil || requests[0].ToolChoice.Type != "required" {
 		t.Fatalf("tool choice = %#v", requests[0].ToolChoice)
+	}
+}
+
+func TestAnthropicMessagesProxyReturnsUnconfiguredWebSearchMessage(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	provider := &recordingProvider{}
+	server := New(cfg, store, provider, "test")
+	body := map[string]any{
+		"model": "claude-haiku-4-5",
+		"messages": []map[string]any{
+			{"role": "user", "content": "search the web"},
+		},
+		"tools": []map[string]any{{
+			"type":     "web_search_20250305",
+			"name":     "web_search",
+			"max_uses": 3,
+		}},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		StopReason string `json:"stop_reason"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(resp.Content) != 1 || resp.Content[0].Type != "text" {
+		t.Fatalf("unexpected content: %s", rec.Body.String())
+	}
+	if !strings.Contains(resp.Content[0].Text, "Broxy is being used as an AWS Bedrock proxy") {
+		t.Fatalf("unexpected text: %q", resp.Content[0].Text)
+	}
+	if !strings.Contains(resp.Content[0].Text, "provider \"brave\"") {
+		t.Fatalf("missing Brave config guidance: %q", resp.Content[0].Text)
+	}
+	if resp.StopReason != "end_turn" {
+		t.Fatalf("stop_reason = %q", resp.StopReason)
+	}
+	requests := provider.Requests()
+	if len(requests) != 0 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+}
+
+func TestAnthropicMessagesProxyRunsConfiguredWebSearch(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	addTestModelRoute(t, store)
+
+	provider := &webSearchProvider{}
+	searchProvider := &fakeSearchProvider{}
+	server := New(cfg, store, provider, "test")
+	server.search = searchProvider
+	body := map[string]any{
+		"model": "claude-haiku-4-5",
+		"messages": []map[string]any{
+			{"role": "user", "content": "search the web"},
+		},
+		"tools": []map[string]any{{
+			"type":            "web_search_20250305",
+			"name":            "web_search",
+			"max_uses":        2,
+			"allowed_domains": []string{"example.com"},
+		}},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Brave found the answer") {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+	searchRequests := searchProvider.Requests()
+	if len(searchRequests) != 1 {
+		t.Fatalf("search request count = %d", len(searchRequests))
+	}
+	if searchRequests[0].Query != "broxy web search" {
+		t.Fatalf("search query = %q", searchRequests[0].Query)
+	}
+	if len(searchRequests[0].AllowedDomains) != 1 || searchRequests[0].AllowedDomains[0] != "example.com" {
+		t.Fatalf("allowed domains = %#v", searchRequests[0].AllowedDomains)
+	}
+	upstreamRequests := provider.Requests()
+	if len(upstreamRequests) != 2 {
+		t.Fatalf("upstream request count = %d", len(upstreamRequests))
+	}
+	if len(upstreamRequests[0].Tools) == 0 || upstreamRequests[0].Tools[0].Name != "web_search" {
+		t.Fatalf("upstream tools = %#v", upstreamRequests[0].Tools)
+	}
+	if !hasToolResult(upstreamRequests[1].Messages) {
+		t.Fatalf("second upstream request missing tool result: %#v", upstreamRequests[1].Messages)
 	}
 }
 

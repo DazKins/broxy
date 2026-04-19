@@ -23,6 +23,7 @@ import (
 	"github.com/personal/broxy/internal/domain"
 	"github.com/personal/broxy/internal/logging"
 	"github.com/personal/broxy/internal/pricing"
+	searchpkg "github.com/personal/broxy/internal/search"
 	"github.com/personal/broxy/internal/security"
 	"github.com/personal/broxy/internal/ui"
 )
@@ -35,6 +36,7 @@ type Server struct {
 	cfg       *config.Config
 	store     *db.Store
 	provider  Provider
+	search    searchpkg.Provider
 	sessions  *securecookie.SecureCookie
 	startedAt time.Time
 	version   string
@@ -57,10 +59,15 @@ func New(cfg *config.Config, store *db.Store, provider Provider, version string)
 func NewWithLogger(cfg *config.Config, store *db.Store, provider Provider, version string, logger *slog.Logger) *Server {
 	hashKey := []byte(cfg.SessionSecret)
 	blockKey := []byte(cfg.SessionSecret)
+	searchProvider, err := searchpkg.NewProvider(cfg.Search)
+	if err != nil && logger != nil {
+		logger.Warn("search provider disabled", "error", err)
+	}
 	return &Server{
 		cfg:       cfg,
 		store:     store,
 		provider:  provider,
+		search:    searchProvider,
 		sessions:  securecookie.New(hashKey, blockKey[:16]),
 		startedAt: time.Now().UTC(),
 		version:   version,

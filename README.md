@@ -342,6 +342,25 @@ broxy models add \
 
 Claude Code's `apiKeyHelper` reads the key from `BROXY_API_KEY`, while the `settings.json` `env` block applies the remaining gateway settings to Claude sessions without requiring extra shell exports.
 
+Claude Code may issue Anthropic server-tool declarations such as `web_search_20250305` when its WebSearch tool is used. Broxy can execute those searches through a configured search provider, then pass the results back to Bedrock as tool output before returning the final assistant message.
+
+To enable Brave Search, add a `search` block to the config file shown by `broxy config path`:
+
+```json
+{
+  "search": {
+    "provider": "brave",
+    "brave_api_key": "YOUR_BRAVE_SEARCH_API_KEY",
+    "max_results": 5,
+    "timeout_seconds": 10,
+    "country": "us",
+    "search_lang": "en"
+  }
+}
+```
+
+If no search provider is configured, Broxy returns an assistant message explaining how to configure Brave instead of forwarding the unsupported server-side web search tool to Bedrock.
+
 ## Bedrock authentication
 
 Configure Bedrock in the generated config file shown by `broxy config path`.
