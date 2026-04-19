@@ -362,6 +362,66 @@ To enable Brave Search, add a `search` block to the config file shown by `broxy 
 
 If no search provider is configured, Broxy returns an assistant message explaining how to configure Brave instead of forwarding the unsupported server-side web search tool to Bedrock.
 
+## Using Broxy with OpenClaw
+
+OpenClaw can use Broxy as a custom OpenAI-compatible provider through the `models.providers` configuration. First create a Broxy client key:
+
+```bash
+broxy apikey create --name openclaw
+```
+
+Export that key in the shell where you start OpenClaw:
+
+```bash
+export BROXY_API_KEY="YOUR_PROXY_KEY"
+```
+
+Then add a Broxy provider block to your `~/.openclaw/openclaw.json`:
+
+```json5
+{
+  models: {
+    mode: "merge",
+    providers: {
+      broxy: {
+        baseUrl: "http://127.0.0.1:27699/v1", // replace with remote url if not using local broxy
+        apiKey: "${BROXY_API_KEY}",
+        api: "openai-responses",
+        models: [
+          {
+            id: "claude-opus-4.6",
+            name: "Claude Opus 4.6 via Broxy",
+            reasoning: false,
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 200000,
+            maxTokens: 32000,
+          }
+        ],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: "broxy/claude-opus-4.6",
+      },
+    },
+  },
+}
+```
+
+Make sure each configured model ID is available as a Broxy model alias:
+
+```bash
+broxy models add \
+  --alias claude-opus-4.6 \
+  --model-id global.anthropic.claude-opus-4-6-v1 \
+  --region us-east-1
+```
+
+Use `api: "openai-responses"` so OpenClaw talks to Broxy through `/v1/responses`, which supports function tool calls and tool result follow-ups. Cost fields are set to zero because Broxy tracks usage and costs independently.
+
 ## Bedrock authentication
 
 Configure Bedrock in the generated config file shown by `broxy config path`.
