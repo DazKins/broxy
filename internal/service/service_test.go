@@ -1,7 +1,10 @@
 package service
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -76,5 +79,74 @@ func TestCapturedEnvironmentIncludesBearerToken(t *testing.T) {
 	env := CapturedEnvironment()
 	if env["AWS_BEARER_TOKEN_BEDROCK"] != "token" {
 		t.Fatalf("CapturedEnvironment() missing AWS_BEARER_TOKEN_BEDROCK, got %#v", env)
+	}
+}
+
+func TestResetLinuxStopsReinstallsAndStarts(t *testing.T) {
+	tmpDir := t.TempDir()
+	def := &Definition{
+		Target:      TargetLinux,
+		Label:       SystemdUnit,
+		ServiceFile: filepath.Join(tmpDir, "broxy.service"),
+		Executable:  "/tmp/broxy",
+		ConfigPath:  "/tmp/broxy-config/config.json",
+		StateDir:    tmpDir,
+		StdoutPath:  filepath.Join(tmpDir, "stdout.log"),
+		StderrPath:  filepath.Join(tmpDir, "stderr.log"),
+	}
+	if err := os.WriteFile(def.ServiceFile, []byte("old unit"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	var calls []string
+	originalRun := run
+	run = func(name string, args ...string) error {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return nil
+	}
+	defer func() {
+		run = originalRun
+	}()
+
+	if err := Reset(def); err != nil {
+		t.Fatalf("Reset() error = %v", err)
+	}
+
+	want := []string{
+		"systemctl --user stop broxy.service",
+		"systemctl --user disable --now broxy.service",
+		"systemctl --user daemon-reload",
+		"systemctl --user daemon-reload",
+		"systemctl --user enable broxy.service",
+		"systemctl --user start broxy.service",
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
+	}
+	body, err := os.ReadFile(def.ServiceFile)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(body), "ExecStart=\"/tmp/broxy\" serve --config \"/tmp/broxy-config/config.json\"") {
+		t.Fatalf("reset did not install updated unit: %s", string(body))
+	}
+}
+
+func TestResetStopsOnStopError(t *testing.T) {
+	stopErr := errors.New("stop failed")
+	originalRun := run
+	run = func(name string, args ...string) error {
+		return stopErr
+	}
+	defer func() {
+		run = originalRun
+	}()
+
+	err := Reset(&Definition{Target: TargetLinux})
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("Reset() error = %v, want %v", err, stopErr)
+	}
+	if !strings.Contains(err.Error(), "stop service") {
+		t.Fatalf("Reset() error missing context: %v", err)
 	}
 }

@@ -130,3 +130,11 @@ func TestServiceInstallDryRunIncludesConfigEnv(t *testing.T) {
 		t.Fatalf("dry-run output missing config log env: %s", stdout.String())
 	}
 }
+
+func TestServiceResetCommandIsRegistered(t *testing.T) {
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"service", "reset", "--help"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}

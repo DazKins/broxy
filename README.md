@@ -77,6 +77,7 @@ broxy service install
 broxy service start
 broxy service status
 broxy service restart
+broxy service reset
 broxy service logs --lines 100
 broxy service stop
 broxy service uninstall

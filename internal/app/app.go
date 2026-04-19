@@ -275,6 +275,24 @@ func newServiceCommand(configPath *string) *cobra.Command {
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
+		Use:   "reset",
+		Short: "Reinstall and start the background service",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			def, cfg, err := serviceDefinition(*configPath, true)
+			if err != nil {
+				return err
+			}
+			if err := cfgpkg.EnsureLayout(cfg); err != nil {
+				return err
+			}
+			if err := service.Reset(def); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Reset broxy service")
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
 		Use:   "status",
 		Short: "Show background service status",
 		RunE: func(cmd *cobra.Command, args []string) error {

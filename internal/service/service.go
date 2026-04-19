@@ -147,6 +147,22 @@ func Restart(def *Definition) error {
 	}
 }
 
+func Reset(def *Definition) error {
+	if err := Stop(def); err != nil {
+		return fmt.Errorf("stop service: %w", err)
+	}
+	if err := Uninstall(def); err != nil {
+		return fmt.Errorf("uninstall service: %w", err)
+	}
+	if err := Install(def); err != nil {
+		return fmt.Errorf("install service: %w", err)
+	}
+	if err := Start(def); err != nil {
+		return fmt.Errorf("start service: %w", err)
+	}
+	return nil
+}
+
 func GetStatus(def *Definition) (*Status, error) {
 	switch def.Target {
 	case TargetLinux:
@@ -446,7 +462,9 @@ func launchdDomain() string {
 	return "gui/" + currentUser.Uid
 }
 
-func run(name string, args ...string) error {
+var run = defaultRun
+
+func defaultRun(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
