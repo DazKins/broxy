@@ -378,40 +378,42 @@ export BROXY_API_KEY="YOUR_PROXY_KEY"
 
 Then add a Broxy provider block to your `~/.openclaw/openclaw.json`:
 
-```json5
+```json
 {
-  models: {
-    mode: "merge",
-    providers: {
-      broxy: {
-        baseUrl: "http://127.0.0.1:27699/v1", // replace with remote url if not using local broxy
-        apiKey: "${BROXY_API_KEY}",
-        api: "openai-responses",
-        models: [
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "broxy": {
+        "baseUrl": "http://127.0.0.1:27699/v1",
+        "apiKey": "${BROXY_API_KEY}",
+        "api": "openai-responses",
+        "models": [
           {
-            id: "claude-opus-4.6",
-            name: "Claude Opus 4.6 via Broxy",
-            reasoning: false,
-            input: ["text"],
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 200000,
-            maxTokens: 32000,
+            "id": "claude-opus-4.6",
+            "name": "Claude Opus 4.6 via Broxy",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 200000,
+            "maxTokens": 32000
           }
-        ],
-      },
-    },
+        ]
+      }
+    }
   },
-  agents: {
-    defaults: {
-      model: {
-        primary: "broxy/claude-opus-4.6",
-      },
-    },
-  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "broxy/claude-opus-4.6"
+      }
+    }
+  }
 }
 ```
 
-Make sure each configured model ID is available as a Broxy model alias:
+Replace `baseUrl` with a remote URL if not using local Broxy.
+
+Make sure the configured model is available as a Broxy model alias:
 
 ```bash
 broxy models add \
@@ -419,8 +421,6 @@ broxy models add \
   --model-id global.anthropic.claude-opus-4-6-v1 \
   --region us-east-1
 ```
-
-Use `api: "openai-responses"` so OpenClaw talks to Broxy through `/v1/responses`, which supports function tool calls and tool result follow-ups. Cost fields are set to zero because Broxy tracks usage and costs independently.
 
 ## Bedrock authentication
 
