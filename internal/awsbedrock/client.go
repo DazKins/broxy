@@ -334,7 +334,6 @@ func sdkToolConfig(tools []domain.ToolDefinition, choice *domain.ToolChoice) (*b
 			Name:        ptrString(tool.Name),
 			Description: ptrString(tool.Description),
 			InputSchema: &brtypes.ToolInputSchemaMemberJson{Value: schemaValue},
-			Strict:      tool.Strict,
 		}})
 	}
 	cfg := &brtypes.ToolConfiguration{Tools: items}
