@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 type UpstreamAuthMode string
@@ -15,6 +14,9 @@ const (
 	UpstreamAuthBearer UpstreamAuthMode = "bearer"
 
 	DefaultListenAddr = "127.0.0.1:27699"
+	DefaultConfigDir  = "/etc/broxy"
+	DefaultStateDir   = "/var/lib/broxy"
+	DefaultLogDir     = "/var/log/broxy"
 )
 
 type UpstreamConfig struct {
@@ -42,6 +44,7 @@ type Config struct {
 	DBPath        string            `json:"db_path"`
 	SessionSecret string            `json:"session_secret"`
 	PricingPath   string            `json:"pricing_path"`
+	LogDirPath    string            `json:"log_dir,omitempty"`
 	Upstream      UpstreamConfig    `json:"upstream"`
 	Search        SearchConfig      `json:"search,omitempty"`
 	Env           map[string]string `json:"env"`
@@ -63,6 +66,7 @@ type fileConfig struct {
 	DBPath        string            `json:"db_path"`
 	SessionSecret string            `json:"session_secret"`
 	PricingPath   string            `json:"pricing_path"`
+	LogDirPath    string            `json:"log_dir,omitempty"`
 	Upstream      UpstreamConfig    `json:"upstream"`
 	Search        SearchConfig      `json:"search,omitempty"`
 	Env           map[string]string `json:"env"`
@@ -85,28 +89,29 @@ func PathsForConfigPath(path string) (Paths, error) {
 	if err != nil {
 		return Paths{}, err
 	}
-	if !pathWithinDir(configPath, defaultPaths.ConfigDir) {
-		return Paths{}, fmt.Errorf("config path %s must be inside %s", configPath, defaultPaths.ConfigDir)
+	if configPath == defaultPaths.ConfigPath {
+		return defaultPaths, nil
 	}
 
-	defaultPaths.ConfigPath = configPath
-	return defaultPaths, nil
+	configDir := filepath.Dir(configPath)
+	return Paths{
+		ConfigDir:   configDir,
+		ConfigPath:  configPath,
+		StateDir:    configDir,
+		DBPath:      filepath.Join(configDir, "broxy.db"),
+		PricingPath: filepath.Join(configDir, "pricing.json"),
+		LogDir:      filepath.Join(configDir, "logs"),
+	}, nil
 }
 
 func platformPaths() (Paths, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return Paths{}, fmt.Errorf("get user home dir: %w", err)
-	}
-
-	root := filepath.Join(homeDir, ".broxy")
 	return Paths{
-		ConfigDir:   root,
-		ConfigPath:  filepath.Join(root, "config.json"),
-		StateDir:    root,
-		DBPath:      filepath.Join(root, "broxy.db"),
-		PricingPath: filepath.Join(root, "pricing.json"),
-		LogDir:      filepath.Join(root, "logs"),
+		ConfigDir:   DefaultConfigDir,
+		ConfigPath:  filepath.Join(DefaultConfigDir, "config.json"),
+		StateDir:    DefaultStateDir,
+		DBPath:      filepath.Join(DefaultStateDir, "broxy.db"),
+		PricingPath: filepath.Join(DefaultConfigDir, "pricing.json"),
+		LogDir:      DefaultLogDir,
 	}, nil
 }
 
@@ -128,6 +133,7 @@ func DefaultForPath(path string) (*Config, error) {
 		StateDir:    paths.StateDir,
 		DBPath:      paths.DBPath,
 		PricingPath: paths.PricingPath,
+		LogDirPath:  paths.LogDir,
 		Env:         map[string]string{},
 		Upstream: UpstreamConfig{
 			Mode:        mode,
@@ -191,6 +197,7 @@ func Save(path string, cfg *Config) error {
 		DBPath:        cfg.DBPath,
 		SessionSecret: cfg.SessionSecret,
 		PricingPath:   cfg.PricingPath,
+		LogDirPath:    cfg.LogDir(),
 		Upstream:      cfg.Upstream,
 		Search:        cfg.Search,
 		Env:           cloneEnv(cfg.Env),
@@ -224,6 +231,9 @@ func EnsureLayout(cfg *Config) error {
 }
 
 func (cfg *Config) LogDir() string {
+	if cfg.LogDirPath != "" {
+		return cfg.LogDirPath
+	}
 	return filepath.Join(cfg.StateDir, "logs")
 }
 
@@ -255,6 +265,7 @@ func applyDefaults(cfg *Config, path string) error {
 	cfg.StateDir = defaultPaths.StateDir
 	cfg.DBPath = defaultPaths.DBPath
 	cfg.PricingPath = defaultPaths.PricingPath
+	cfg.LogDirPath = defaultPaths.LogDir
 	if cfg.Env == nil {
 		cfg.Env = map[string]string{}
 	}
@@ -399,14 +410,6 @@ func cleanAbs(path string) (string, error) {
 		path = abs
 	}
 	return filepath.Clean(path), nil
-}
-
-func pathWithinDir(path, dir string) bool {
-	rel, err := filepath.Rel(dir, path)
-	if err != nil {
-		return false
-	}
-	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 func overrideFromEnv(cfg *Config) {

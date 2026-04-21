@@ -27,10 +27,10 @@
 
 ## Install
 
-Broxy is packaged as a single binary plus a native user service:
+Broxy is packaged as a single binary plus a native service:
 
-- macOS: LaunchAgent under `~/Library/LaunchAgents/com.broxy.agent.plist`
-- Linux: systemd user unit under `${XDG_CONFIG_HOME:-~/.config}/systemd/user/broxy.service`
+- macOS: LaunchDaemon under `/Library/LaunchDaemons/com.broxy.daemon.plist`
+- Linux: systemd system unit under `/etc/systemd/system/broxy.service`
 
 Default install:
 
@@ -38,10 +38,12 @@ Default install:
 curl -fsSL https://raw.githubusercontent.com/DazKins/broxy/main/scripts/install.sh | sh
 ```
 
+The installer may prompt for sudo when it writes global files and starts the service.
+
 The installer:
 
 1. downloads the latest GitHub Release archive for your OS and CPU
-2. installs `broxy` to `~/.local/bin`
+2. installs `broxy` to `/usr/local/bin`
 3. initializes config and state on first install
 4. installs the background service
 5. starts or restarts the service
@@ -54,13 +56,12 @@ BROXY_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/DazKins/broxy/
 
 ## Default paths
 
-Broxy stores all app-owned files under `~/.broxy/` on every platform:
+Broxy stores app-owned files in global system locations:
 
-- root: `~/.broxy/`
-- config: `~/.broxy/config.json`
-- pricing: `~/.broxy/pricing.json`
-- database: `~/.broxy/broxy.db`
-- logs: `~/.broxy/logs/`
+- config: `/etc/broxy/config.json`
+- pricing: `/etc/broxy/pricing.json`
+- database: `/var/lib/broxy/broxy.db`
+- logs: `/var/log/broxy/`
 
 Inspect the effective paths on any machine:
 
@@ -83,7 +84,22 @@ broxy service stop
 broxy service uninstall
 ```
 
-On Linux, the service runs as a user service and starts automatically after that user logs in. On macOS, it runs as a LaunchAgent for the logged-in user.
+Broxy installs a root-level service, so use sudo for commands that modify the service:
+
+```bash
+sudo broxy service install
+sudo broxy service start
+sudo broxy service restart
+sudo broxy service reset
+sudo broxy service stop
+sudo broxy service uninstall
+```
+
+The service is managed by root and the daemon runs as the dedicated `broxy` service user/group. Check it with:
+
+```bash
+broxy service status
+```
 
 Add environment variables that the service should always receive to the config file's `env` block, then restart the service:
 
@@ -99,13 +115,46 @@ Add environment variables that the service should always receive to the config f
 
 `BROXY_LOG_LEVEL=debug` enables debug logging, including raw upstream Responses API payloads in the service logs. Re-run `broxy service install` after changing `env` if you want the native systemd or launchd service definition to show the updated values too.
 
+On install, Broxy creates the `broxy` service user/group when needed. `/etc/broxy` remains root-owned and group-readable by `broxy`; `/etc/broxy/pricing.json` is group-writable because the admin model routes can update pricing entries. `/var/lib/broxy` and `/var/log/broxy` are owned by `broxy`.
+
+## Complete uninstall
+
+To remove Broxy completely, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DazKins/broxy/main/scripts/uninstall.sh | sh
+```
+
+This removes the native service definition, installed binary, config, pricing file, SQLite database, logs, and the dedicated `broxy` service user/group. It deletes all local Broxy data.
+
+## Nginx reverse proxy
+
+For a public VPS, keep Broxy listening on loopback and proxy to it from nginx:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:27699;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    proxy_buffering off;
+    proxy_read_timeout 360s;
+    proxy_send_timeout 360s;
+}
+```
+
+Long Bedrock requests can exceed nginx's default upstream read timeout. If nginx logs show `upstream timed out` or `upstream prematurely closed connection`, first verify `broxy service status` shows `state=active`, then increase the nginx proxy timeouts.
+
 ## First-time setup without the installer
 
 ```bash
 go build -o ./broxy ./cmd/broxy
-./broxy init
-./broxy service install
-./broxy service start
+sudo ./broxy init
+sudo ./broxy service install
+sudo ./broxy service start
 ```
 
 Reset the local admin password if needed:

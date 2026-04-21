@@ -2,7 +2,7 @@
 set -eu
 
 REPO="${BROXY_INSTALL_REPO:-DazKins/broxy}"
-INSTALL_BIN_DIR="${BROXY_INSTALL_BIN_DIR:-$HOME/.local/bin}"
+INSTALL_BIN_DIR="${BROXY_INSTALL_BIN_DIR:-/usr/local/bin}"
 VERSION="${BROXY_VERSION:-}"
 
 detect_os() {
@@ -57,34 +57,20 @@ checksum_tool() {
   exit 1
 }
 
-ensure_path_entry() {
-  case ":$PATH:" in
-    *":$INSTALL_BIN_DIR:"*) return ;;
-  esac
-
-  shell_name="$(basename "${SHELL:-sh}")"
-  rc_file="$HOME/.profile"
-  case "$shell_name" in
-    zsh) rc_file="$HOME/.zprofile" ;;
-    bash)
-      if [ -f "$HOME/.bash_profile" ]; then
-        rc_file="$HOME/.bash_profile"
-      else
-        rc_file="$HOME/.profile"
-      fi
-      ;;
-  esac
-
-  mkdir -p "$(dirname "$rc_file")"
-  touch "$rc_file"
-  export_line="export PATH=\"$INSTALL_BIN_DIR:\$PATH\""
-  if ! grep -Fqs "$export_line" "$rc_file"; then
-    printf '\n%s\n' "$export_line" >>"$rc_file"
-  fi
-}
-
 run_broxy() {
   "$INSTALL_BIN_DIR/broxy" "$@"
+}
+
+run_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    sudo "$@"
+    return
+  fi
+  "$@"
+}
+
+run_broxy_root() {
+  run_root "$INSTALL_BIN_DIR/broxy" "$@"
 }
 
 OS="$(detect_os)"
@@ -124,28 +110,25 @@ fi
   fi
 )
 
-mkdir -p "$INSTALL_BIN_DIR"
+run_root mkdir -p "$INSTALL_BIN_DIR"
 tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
-install -m 0755 "$TMP_DIR/broxy" "$INSTALL_BIN_DIR/broxy"
-
-ensure_path_entry
+run_root install -m 0755 "$TMP_DIR/broxy" "$INSTALL_BIN_DIR/broxy"
 
 CONFIG_INFO="$(run_broxy config path)"
 RESOLVED_CONFIG_PATH="$(printf '%s\n' "$CONFIG_INFO" | sed -n 's/^config_path=//p' | head -n 1)"
 FIRST_INSTALL=0
 if [ ! -f "$RESOLVED_CONFIG_PATH" ]; then
   FIRST_INSTALL=1
-  INIT_OUTPUT="$(run_broxy init --non-interactive --json)"
+  INIT_OUTPUT="$(run_broxy_root init --non-interactive --json)"
   printf '%s\n' "$INIT_OUTPUT"
 fi
 
-run_broxy service install
+run_broxy_root service install
 if [ "$FIRST_INSTALL" -eq 1 ]; then
-  run_broxy service start
+  run_broxy_root service start
 else
-  run_broxy service restart
+  run_broxy_root service restart
 fi
 
 printf 'broxy %s installed at %s/broxy\n' "$RELEASE_TAG" "$INSTALL_BIN_DIR"
 printf 'Config path: %s\n' "$RESOLVED_CONFIG_PATH"
-printf 'Open a new shell if %s was newly added to PATH.\n' "$INSTALL_BIN_DIR"

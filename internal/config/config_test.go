@@ -9,27 +9,48 @@ import (
 func testBroxyRoot(t *testing.T) string {
 	t.Helper()
 
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("XDG_STATE_HOME", "")
-	t.Setenv("XDG_CACHE_HOME", "")
-	return filepath.Join(homeDir, ".broxy")
+	return t.TempDir()
 }
 
-func TestDefaultForPathUsesBroxyRoot(t *testing.T) {
-	root := testBroxyRoot(t)
-
+func TestDefaultForPathUsesGlobalPaths(t *testing.T) {
 	cfg, err := DefaultForPath("")
 	if err != nil {
 		t.Fatalf("DefaultForPath() error = %v", err)
 	}
 
+	if cfg.ConfigDir != DefaultConfigDir {
+		t.Fatalf("ConfigDir = %q, want %q", cfg.ConfigDir, DefaultConfigDir)
+	}
+	if cfg.StateDir != DefaultStateDir {
+		t.Fatalf("StateDir = %q, want %q", cfg.StateDir, DefaultStateDir)
+	}
+	if cfg.DBPath != filepath.Join(DefaultStateDir, "broxy.db") {
+		t.Fatalf("DBPath = %q", cfg.DBPath)
+	}
+	if cfg.PricingPath != filepath.Join(DefaultConfigDir, "pricing.json") {
+		t.Fatalf("PricingPath = %q", cfg.PricingPath)
+	}
+	if cfg.LogDir() != DefaultLogDir {
+		t.Fatalf("LogDir = %q, want %q", cfg.LogDir(), DefaultLogDir)
+	}
+	if cfg.ListenAddr != DefaultListenAddr {
+		t.Fatalf("ListenAddr = %q, want %q", cfg.ListenAddr, DefaultListenAddr)
+	}
+}
+
+func TestConfigPathOverrideUsesContainingDirectory(t *testing.T) {
+	root := testBroxyRoot(t)
+	configPath := filepath.Join(root, "config.json")
+
+	cfg, err := DefaultForPath(configPath)
+	if err != nil {
+		t.Fatalf("DefaultForPath() error = %v", err)
+	}
 	if cfg.ConfigDir != root {
 		t.Fatalf("ConfigDir = %q, want %q", cfg.ConfigDir, root)
 	}
 	if cfg.StateDir != root {
-		t.Fatalf("StateDir = %q", cfg.StateDir)
+		t.Fatalf("StateDir = %q, want %q", cfg.StateDir, root)
 	}
 	if cfg.DBPath != filepath.Join(root, "broxy.db") {
 		t.Fatalf("DBPath = %q", cfg.DBPath)
@@ -37,16 +58,8 @@ func TestDefaultForPathUsesBroxyRoot(t *testing.T) {
 	if cfg.PricingPath != filepath.Join(root, "pricing.json") {
 		t.Fatalf("PricingPath = %q", cfg.PricingPath)
 	}
-	if cfg.ListenAddr != DefaultListenAddr {
-		t.Fatalf("ListenAddr = %q, want %q", cfg.ListenAddr, DefaultListenAddr)
-	}
-}
-
-func TestConfigPathRejectsOutsideBroxyRoot(t *testing.T) {
-	testBroxyRoot(t)
-
-	if _, err := ConfigPath(filepath.Join(t.TempDir(), "config.json")); err == nil {
-		t.Fatalf("ConfigPath() error = nil, want outside root error")
+	if cfg.LogDir() != filepath.Join(root, "logs") {
+		t.Fatalf("LogDir = %q", cfg.LogDir())
 	}
 }
 

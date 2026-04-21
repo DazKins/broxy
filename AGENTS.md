@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`cmd/broxy` contains the CLI entrypoint. Core application code lives under `internal/`: `app` wires commands, `httpapi` serves the OpenAI-compatible API, `awsbedrock` handles upstream calls, `db` manages SQLite storage, `config` resolves paths and config, `service` manages user services, and `ui` embeds the admin UI. Static UI assets are committed under `internal/ui/dist/`; there is currently no frontend source tree checked in under `web/`. CI and release automation live in `.github/workflows/`, and the installer script is `scripts/install.sh`.
+`cmd/broxy` contains the CLI entrypoint. Core application code lives under `internal/`: `app` wires commands, `httpapi` serves the OpenAI-compatible API, `awsbedrock` handles upstream calls, `db` manages SQLite storage, `config` resolves paths and config, `service` manages root-level services, and `ui` embeds the admin UI. Static UI assets are committed under `internal/ui/dist/`; there is currently no frontend source tree checked in under `web/`. CI and release automation live in `.github/workflows/`, and the installer script is `scripts/install.sh`.
 
 ## Build, Test, and Development Commands
 Use the standard Go toolchain from `go.mod`.
@@ -46,4 +46,4 @@ To publish a release, commit the intended changes to `main`, then create and pus
 Do not reuse or move an existing release tag unless explicitly asked to repair a failed release. The binary version is injected by GoReleaser through `.goreleaser.yml` using `-X github.com/personal/broxy/internal/app.Version={{ .Version }}`, so normal releases do not require editing a version constant. After pushing the tag, verify the release appears at `https://github.com/DazKins/broxy/releases/tag/vX.Y.Z` with assets for darwin/linux amd64/arm64 and `checksums.txt`.
 
 ## Security & Configuration Tips
-Do not commit real AWS credentials, generated config files, SQLite databases, or local logs. Use `broxy config path` for local testing; Broxy-owned config, pricing, database, and log files are expected under `~/.broxy/`. For network-dependent tooling such as GitHub release downloads or AWS calls, respect the existing proxy environment when working behind restricted networks.
+Do not commit real AWS credentials, generated config files, SQLite databases, or local logs. Use `broxy config path` for local testing; Broxy-owned config and pricing files are expected under `/etc/broxy/`, database files under `/var/lib/broxy/`, and log files under `/var/log/broxy/`. For network-dependent tooling such as GitHub release downloads or AWS calls, respect the existing proxy environment when working behind restricted networks.

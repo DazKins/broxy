@@ -13,11 +13,7 @@ import (
 func testBroxyHome(t *testing.T) string {
 	t.Helper()
 
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("XDG_STATE_HOME", "")
-	return filepath.Join(homeDir, ".broxy")
+	return t.TempDir()
 }
 
 func TestInitCommandJSON(t *testing.T) {
@@ -53,7 +49,6 @@ func TestInitCommandJSON(t *testing.T) {
 }
 
 func TestConfigPathCommandJSON(t *testing.T) {
-	root := testBroxyHome(t)
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 
@@ -69,10 +64,10 @@ func TestConfigPathCommandJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v body=%s", err, stdout.String())
 	}
-	if payload["config_path"] != filepath.Join(root, "config.json") {
+	if payload["config_path"] != filepath.Join(cfgpkg.DefaultConfigDir, "config.json") {
 		t.Fatalf("config_path = %q", payload["config_path"])
 	}
-	if payload["db_path"] != filepath.Join(root, "broxy.db") {
+	if payload["db_path"] != filepath.Join(cfgpkg.DefaultStateDir, "broxy.db") {
 		t.Fatalf("db_path = %q", payload["db_path"])
 	}
 }

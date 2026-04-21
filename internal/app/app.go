@@ -44,7 +44,7 @@ func NewRootCommand() *cobra.Command {
 		Use:   "broxy",
 		Short: "Standalone Bedrock proxy with OpenAI-compatible API, admin UI, and CLI",
 	}
-	cmd.PersistentFlags().StringVar(&configPath, "config", "", "config file path inside ~/.broxy")
+	cmd.PersistentFlags().StringVar(&configPath, "config", "", "config file path")
 	cmd.AddCommand(
 		newInitCommand(&configPath),
 		newServeCommand(&configPath),
@@ -187,7 +187,7 @@ func newServiceCommand(configPath *string) *cobra.Command {
 	var dryRun bool
 	installCmd := &cobra.Command{
 		Use:   "install",
-		Short: "Install the native user service definition",
+		Short: "Install the native service definition",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			def, cfg, err := serviceDefinition(*configPath, !dryRun)
 			if err != nil {
@@ -216,7 +216,7 @@ func newServiceCommand(configPath *string) *cobra.Command {
 	cmd.AddCommand(installCmd)
 	cmd.AddCommand(&cobra.Command{
 		Use:   "uninstall",
-		Short: "Remove the native user service definition",
+		Short: "Remove the native service definition",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			def, _, err := serviceDefinition(*configPath, false)
 			if err != nil {
@@ -323,6 +323,8 @@ func newServiceCommand(configPath *string) *cobra.Command {
 			subState := ""
 			enabled := "installed"
 			pid := ""
+			lastExitCode := ""
+			result := ""
 			manager := string(def.Target)
 			if status != nil {
 				manager = status.Manager
@@ -334,16 +336,28 @@ func newServiceCommand(configPath *string) *cobra.Command {
 					enabled = status.Enabled
 				}
 				pid = status.PID
+				lastExitCode = status.LastExitCode
+				result = status.Result
 			}
 			fmt.Fprintf(
 				cmd.OutOrStdout(),
-				"manager=%s\nservice=%s\nstate=%s\nsubstate=%s\nenabled=%s\npid=%s\nconfig=%s\nlisten_addr=%s\nversion=%s\n",
+				"manager=%s\nservice=%s\nstate=%s\nsubstate=%s\nenabled=%s\npid=%s\n",
 				manager,
 				def.Label,
 				state,
 				subState,
 				enabled,
 				pid,
+			)
+			if lastExitCode != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "last_exit_code=%s\n", lastExitCode)
+			}
+			if result != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "result=%s\n", result)
+			}
+			fmt.Fprintf(
+				cmd.OutOrStdout(),
+				"config=%s\nlisten_addr=%s\nversion=%s\n",
 				def.ConfigPath,
 				cfg.ListenAddr,
 				Version,
@@ -874,7 +888,7 @@ func awsString(v *string) string {
 func loadOrDefaultConfig(path string) (*cfgpkg.Config, error) {
 	if _, err := os.Stat(path); err == nil {
 		return cfgpkg.Load(path)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) && !os.IsPermission(err) {
 		return nil, err
 	}
 	return cfgpkg.DefaultForPath(path)
@@ -905,7 +919,7 @@ func serviceDefinition(configOverride string, requireConfig bool) (*service.Defi
 	if err != nil {
 		return nil, nil, fmt.Errorf("locate current executable: %w", err)
 	}
-	env := service.CapturedEnvironment()
+	env := map[string]string{}
 	for key, value := range cfg.Env {
 		env[key] = value
 	}
