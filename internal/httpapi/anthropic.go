@@ -42,14 +42,16 @@ type anthropicTool struct {
 	MaxUses        int             `json:"max_uses,omitempty"`
 	AllowedDomains []string        `json:"allowed_domains,omitempty"`
 	BlockedDomains []string        `json:"blocked_domains,omitempty"`
+	CacheControl   json.RawMessage `json:"cache_control,omitempty"`
 }
 
 type normalizedAnthropicMessagesRequest struct {
-	Messages   []domain.BedrockChatMessage
-	System     []string
-	Tools      []domain.ToolDefinition
-	ToolChoice *domain.ToolChoice
-	WebSearch  *anthropicWebSearchConfig
+	Messages         []domain.BedrockChatMessage
+	System           []string
+	SystemCacheAfter []int
+	Tools            []domain.ToolDefinition
+	ToolChoice       *domain.ToolChoice
+	WebSearch        *anthropicWebSearchConfig
 }
 
 type anthropicWebSearchConfig struct {
@@ -120,14 +122,15 @@ func (s *Server) processAnthropicMessagesRequest(ctx context.Context, apiKey *do
 		return nil, http.StatusBadRequest, err
 	}
 	converseReq := domain.ConverseRequest{
-		ModelID:     bedrockModelID,
-		Region:      region,
-		Messages:    normalized.Messages,
-		System:      normalized.System,
-		Temperature: temp,
-		MaxTokens:   maxTokens,
-		Tools:       normalized.Tools,
-		ToolChoice:  normalized.ToolChoice,
+		ModelID:          bedrockModelID,
+		Region:           region,
+		Messages:         normalized.Messages,
+		System:           normalized.System,
+		SystemCacheAfter: normalized.SystemCacheAfter,
+		Temperature:      temp,
+		MaxTokens:        maxTokens,
+		Tools:            normalized.Tools,
+		ToolChoice:       normalized.ToolChoice,
 	}
 	if normalized.ToolChoice != nil && normalized.ToolChoice.Type == "none" {
 		converseReq.Tools = nil
@@ -288,7 +291,7 @@ func (s *Server) runAnthropicWebSearch(ctx context.Context, block domain.Bedrock
 }
 
 func normalizeAnthropicMessagesRequest(req AnthropicMessagesRequest) (*normalizedAnthropicMessagesRequest, error) {
-	system, err := parseAnthropicSystem(req.System)
+	system, systemCacheAfter, err := parseAnthropicSystem(req.System)
 	if err != nil {
 		return nil, err
 	}
@@ -317,44 +320,64 @@ func normalizeAnthropicMessagesRequest(req AnthropicMessagesRequest) (*normalize
 		return nil, err
 	}
 	return &normalizedAnthropicMessagesRequest{
-		Messages:   messages,
-		System:     system,
-		Tools:      tools,
-		ToolChoice: choice,
-		WebSearch:  webSearch,
+		Messages:         messages,
+		System:           system,
+		SystemCacheAfter: systemCacheAfter,
+		Tools:            tools,
+		ToolChoice:       choice,
+		WebSearch:        webSearch,
 	}, nil
 }
 
-func parseAnthropicSystem(raw json.RawMessage) ([]string, error) {
+func parseAnthropicSystem(raw json.RawMessage) ([]string, []int, error) {
 	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var direct string
 	if err := json.Unmarshal(raw, &direct); err == nil {
 		if strings.TrimSpace(direct) == "" {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return []string{direct}, nil
+		return []string{direct}, nil, nil
 	}
 	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type         string          `json:"type"`
+		Text         string          `json:"text"`
+		CacheControl json.RawMessage `json:"cache_control"`
 	}
 	if err := json.Unmarshal(raw, &parts); err != nil {
-		return nil, fmt.Errorf("unsupported system shape")
+		return nil, nil, fmt.Errorf("unsupported system shape")
 	}
 	system := make([]string, 0, len(parts))
+	var cacheAfter []int
 	for _, part := range parts {
 		switch part.Type {
 		case "", "text":
-			if strings.TrimSpace(part.Text) != "" {
-				system = append(system, part.Text)
+			if strings.TrimSpace(part.Text) == "" {
+				continue
+			}
+			system = append(system, part.Text)
+			if hasAnthropicCacheControl(part.CacheControl) {
+				cacheAfter = append(cacheAfter, len(system)-1)
 			}
 		default:
-			return nil, fmt.Errorf("unsupported system content type %q", part.Type)
+			return nil, nil, fmt.Errorf("unsupported system content type %q", part.Type)
 		}
 	}
-	return system, nil
+	return system, cacheAfter, nil
+}
+
+func hasAnthropicCacheControl(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var obj struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return false
+	}
+	return strings.TrimSpace(obj.Type) != ""
 }
 
 func parseAnthropicContentBlocks(raw json.RawMessage) ([]domain.BedrockContentBlock, error) {
@@ -372,27 +395,30 @@ func parseAnthropicContentBlocks(raw json.RawMessage) ([]domain.BedrockContentBl
 	blocks := make([]domain.BedrockContentBlock, 0, len(parts))
 	for _, part := range parts {
 		var block struct {
-			Type      string          `json:"type"`
-			Text      string          `json:"text"`
-			ID        string          `json:"id"`
-			Name      string          `json:"name"`
-			Input     json.RawMessage `json:"input"`
-			ToolUseID string          `json:"tool_use_id"`
-			Content   json.RawMessage `json:"content"`
-			IsError   bool            `json:"is_error"`
+			Type         string          `json:"type"`
+			Text         string          `json:"text"`
+			ID           string          `json:"id"`
+			Name         string          `json:"name"`
+			Input        json.RawMessage `json:"input"`
+			ToolUseID    string          `json:"tool_use_id"`
+			Content      json.RawMessage `json:"content"`
+			IsError      bool            `json:"is_error"`
+			CacheControl json.RawMessage `json:"cache_control"`
 		}
 		if err := json.Unmarshal(part, &block); err != nil {
 			return nil, fmt.Errorf("unsupported content block shape")
 		}
+		cacheHint := hasAnthropicCacheControl(block.CacheControl)
 		switch block.Type {
 		case "", "text":
-			blocks = append(blocks, domain.BedrockContentBlock{Type: "text", Text: block.Text})
+			blocks = append(blocks, domain.BedrockContentBlock{Type: "text", Text: block.Text, CacheHint: cacheHint})
 		case "tool_use":
 			blocks = append(blocks, domain.BedrockContentBlock{
 				Type:      "tool_use",
 				ToolUseID: block.ID,
 				ToolName:  block.Name,
 				ToolInput: append([]byte(nil), nonEmptyJSON(block.Input, []byte(`{}`))...),
+				CacheHint: cacheHint,
 			})
 		case "tool_result":
 			result, err := parseAnthropicToolResultContent(block.Content)
@@ -408,6 +434,7 @@ func parseAnthropicContentBlocks(raw json.RawMessage) ([]domain.BedrockContentBl
 				ToolUseID:        block.ToolUseID,
 				ToolResultStatus: status,
 				ToolResult:       result,
+				CacheHint:        cacheHint,
 			})
 		case "thinking", "redacted_thinking":
 			continue
@@ -473,6 +500,7 @@ func parseAnthropicTools(tools []anthropicTool) ([]domain.ToolDefinition, *anthr
 			Name:        tool.Name,
 			Description: tool.Description,
 			Parameters:  nonEmptyJSON(tool.InputSchema, []byte(`{"type":"object","properties":{}}`)),
+			CacheHint:   hasAnthropicCacheControl(tool.CacheControl),
 		})
 	}
 	return defs, webSearch, nil
@@ -570,6 +598,16 @@ func parseAnthropicToolChoice(raw json.RawMessage, hasTools bool) (*domain.ToolC
 
 func buildAnthropicMessageEnvelope(model string, resp *domain.ConverseResponse) map[string]any {
 	content := buildAnthropicContent(resp)
+	usage := map[string]any{
+		"input_tokens":  resp.Usage.Input,
+		"output_tokens": resp.Usage.Output,
+	}
+	if resp.Usage.CacheRead > 0 {
+		usage["cache_read_input_tokens"] = resp.Usage.CacheRead
+	}
+	if resp.Usage.CacheWrite > 0 {
+		usage["cache_creation_input_tokens"] = resp.Usage.CacheWrite
+	}
 	return map[string]any{
 		"id":            "msg_" + strings.ReplaceAll(uuid.NewString(), "-", ""),
 		"type":          "message",
@@ -578,10 +616,7 @@ func buildAnthropicMessageEnvelope(model string, resp *domain.ConverseResponse) 
 		"content":       content,
 		"stop_reason":   anthropicStopReason(resp.StopReason),
 		"stop_sequence": nil,
-		"usage": map[string]any{
-			"input_tokens":  resp.Usage.Input,
-			"output_tokens": resp.Usage.Output,
-		},
+		"usage":         usage,
 	}
 }
 

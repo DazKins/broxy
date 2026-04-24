@@ -375,8 +375,8 @@ Make sure each configured model is available as a Broxy model alias:
 
 ```bash
 broxy models add \
-  --alias claude-opus-4.6 \
-  --model-id global.anthropic.claude-opus-4-6-v1 \
+  --alias claude-opus-4.7 \
+  --model-id global.anthropic.claude-opus-4-7 \
   --region us-east-1
 
 broxy models add \

@@ -102,6 +102,7 @@ type ToolDefinition struct {
 	Description string `json:"description,omitempty"`
 	Parameters  []byte `json:"parameters,omitempty"`
 	Strict      *bool  `json:"strict,omitempty"`
+	CacheHint   bool   `json:"cache_hint,omitempty"`
 }
 
 type ToolChoice struct {
@@ -124,6 +125,7 @@ type BedrockContentBlock struct {
 	ToolInput        []byte              `json:"tool_input,omitempty"`
 	ToolResultStatus string              `json:"tool_result_status,omitempty"`
 	ToolResult       []ToolResultContent `json:"tool_result,omitempty"`
+	CacheHint        bool                `json:"cache_hint,omitempty"`
 }
 
 type BedrockChatMessage struct {
@@ -133,20 +135,23 @@ type BedrockChatMessage struct {
 }
 
 type ConverseRequest struct {
-	ModelID     string
-	Region      string
-	Messages    []BedrockChatMessage
-	System      []string
-	Temperature *float64
-	MaxTokens   *int
-	Tools       []ToolDefinition
-	ToolChoice  *ToolChoice
+	ModelID          string
+	Region           string
+	Messages         []BedrockChatMessage
+	System           []string
+	SystemCacheAfter []int
+	Temperature      *float64
+	MaxTokens        *int
+	Tools            []ToolDefinition
+	ToolChoice       *ToolChoice
 }
 
 type TokenUsage struct {
-	Input  int `json:"input_tokens"`
-	Output int `json:"output_tokens"`
-	Total  int `json:"total_tokens"`
+	Input      int `json:"input_tokens"`
+	Output     int `json:"output_tokens"`
+	Total      int `json:"total_tokens"`
+	CacheRead  int `json:"cache_read_input_tokens,omitempty"`
+	CacheWrite int `json:"cache_write_input_tokens,omitempty"`
 }
 
 type ConverseResponse struct {
