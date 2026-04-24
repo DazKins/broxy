@@ -70,12 +70,14 @@ func EnsureEntry(path, modelID, region string) (*domain.PricingEntry, error) {
 		}
 	}
 	entry := domain.PricingEntry{
-		ModelID:          modelID,
-		Region:           region,
-		InputPerMTokens:  0,
-		OutputPerMTokens: 0,
-		Version:          RouteDefaultVersion,
-		UpdatedAt:        time.Now().UTC(),
+		ModelID:              modelID,
+		Region:               region,
+		InputPerMTokens:      0,
+		OutputPerMTokens:     0,
+		CacheReadPerMTokens:  0,
+		CacheWritePerMTokens: 0,
+		Version:              RouteDefaultVersion,
+		UpdatedAt:            time.Now().UTC(),
 	}
 	rows = append(rows, entry)
 	if err := SaveToFile(path, rows); err != nil {
@@ -127,7 +129,20 @@ func EstimateCost(entry *domain.PricingEntry, usage domain.TokenUsage) float64 {
 	if entry == nil {
 		return 0
 	}
-	input := (float64(usage.Input) / 1_000_000) * entry.InputPerMTokens
+	cacheRead := max(usage.CacheRead, 0)
+	cacheWrite := max(usage.CacheWrite, 0)
+	uncachedInput := max(usage.Input-cacheRead-cacheWrite, 0)
+	cacheReadRate := entry.CacheReadPerMTokens
+	if cacheReadRate == 0 {
+		cacheReadRate = entry.InputPerMTokens
+	}
+	cacheWriteRate := entry.CacheWritePerMTokens
+	if cacheWriteRate == 0 {
+		cacheWriteRate = entry.InputPerMTokens
+	}
+	input := (float64(uncachedInput) / 1_000_000) * entry.InputPerMTokens
+	input += (float64(cacheRead) / 1_000_000) * cacheReadRate
+	input += (float64(cacheWrite) / 1_000_000) * cacheWriteRate
 	output := (float64(usage.Output) / 1_000_000) * entry.OutputPerMTokens
 	return input + output
 }

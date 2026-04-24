@@ -73,6 +73,8 @@ func (s *Store) migrate() error {
 			region text not null,
 			input_per_m_tokens real not null,
 			output_per_m_tokens real not null,
+			cache_read_per_m_tokens real not null default 0,
+			cache_write_per_m_tokens real not null default 0,
 			version text not null,
 			updated_at text not null,
 			primary key(model_id, region)
@@ -113,12 +115,25 @@ func (s *Store) migrate() error {
 }
 
 func (s *Store) ensureColumns() error {
-	rows, err := s.db.Query("pragma table_info(api_keys)")
+	if err := s.ensureColumn("api_keys", "monthly_limit_usd", `alter table api_keys add column monthly_limit_usd real`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("pricing_entries", "cache_read_per_m_tokens", `alter table pricing_entries add column cache_read_per_m_tokens real not null default 0`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("pricing_entries", "cache_write_per_m_tokens", `alter table pricing_entries add column cache_write_per_m_tokens real not null default 0`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureColumn(table, column, alterStmt string) error {
+	rows, err := s.db.Query("pragma table_info(" + table + ")")
 	if err != nil {
 		return fmt.Errorf("pragma table_info: %w", err)
 	}
 	defer rows.Close()
-	hasMonthlyLimit := false
+	found := false
 	for rows.Next() {
 		var cid int
 		var name string
@@ -129,14 +144,17 @@ func (s *Store) ensureColumns() error {
 		if err := rows.Scan(&cid, &name, &colType, &notnull, &dfltValue, &pk); err != nil {
 			return err
 		}
-		if name == "monthly_limit_usd" {
-			hasMonthlyLimit = true
+		if name == column {
+			found = true
 			break
 		}
 	}
-	if !hasMonthlyLimit {
-		if _, err := s.db.Exec(`alter table api_keys add column monthly_limit_usd real`); err != nil {
-			return fmt.Errorf("alter table add monthly_limit_usd: %w", err)
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan table_info: %w", err)
+	}
+	if !found {
+		if _, err := s.db.Exec(alterStmt); err != nil {
+			return fmt.Errorf("alter table add %s.%s: %w", table, column, err)
 		}
 	}
 	return nil
@@ -339,11 +357,13 @@ func (s *Store) UpsertPricingEntries(ctx context.Context, items []domain.Pricing
 	}
 	defer tx.Rollback()
 	stmt, err := tx.PrepareContext(ctx, `
-		insert into pricing_entries(model_id, region, input_per_m_tokens, output_per_m_tokens, version, updated_at)
-		values (?, ?, ?, ?, ?, ?)
+		insert into pricing_entries(model_id, region, input_per_m_tokens, output_per_m_tokens, cache_read_per_m_tokens, cache_write_per_m_tokens, version, updated_at)
+		values (?, ?, ?, ?, ?, ?, ?, ?)
 		on conflict(model_id, region) do update set
 			input_per_m_tokens = excluded.input_per_m_tokens,
 			output_per_m_tokens = excluded.output_per_m_tokens,
+			cache_read_per_m_tokens = excluded.cache_read_per_m_tokens,
+			cache_write_per_m_tokens = excluded.cache_write_per_m_tokens,
 			version = excluded.version,
 			updated_at = excluded.updated_at
 	`)
@@ -355,7 +375,7 @@ func (s *Store) UpsertPricingEntries(ctx context.Context, items []domain.Pricing
 		if item.UpdatedAt.IsZero() {
 			item.UpdatedAt = time.Now().UTC()
 		}
-		if _, err := stmt.ExecContext(ctx, item.ModelID, item.Region, item.InputPerMTokens, item.OutputPerMTokens, item.Version, item.UpdatedAt.Format(time.RFC3339Nano)); err != nil {
+		if _, err := stmt.ExecContext(ctx, item.ModelID, item.Region, item.InputPerMTokens, item.OutputPerMTokens, item.CacheReadPerMTokens, item.CacheWritePerMTokens, item.Version, item.UpdatedAt.Format(time.RFC3339Nano)); err != nil {
 			return fmt.Errorf("exec pricing upsert: %w", err)
 		}
 	}
@@ -367,13 +387,13 @@ func (s *Store) UpsertPricingEntries(ctx context.Context, items []domain.Pricing
 
 func (s *Store) GetPricingEntry(ctx context.Context, modelID, region string) (*domain.PricingEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
-		select model_id, region, input_per_m_tokens, output_per_m_tokens, version, updated_at
+		select model_id, region, input_per_m_tokens, output_per_m_tokens, cache_read_per_m_tokens, cache_write_per_m_tokens, version, updated_at
 		from pricing_entries
 		where model_id = ? and region = ?
 	`, modelID, region)
 	var item domain.PricingEntry
 	var updatedAt string
-	if err := row.Scan(&item.ModelID, &item.Region, &item.InputPerMTokens, &item.OutputPerMTokens, &item.Version, &updatedAt); err != nil {
+	if err := row.Scan(&item.ModelID, &item.Region, &item.InputPerMTokens, &item.OutputPerMTokens, &item.CacheReadPerMTokens, &item.CacheWritePerMTokens, &item.Version, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
