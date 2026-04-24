@@ -104,9 +104,18 @@ func (c *Client) converseAWS(ctx context.Context, req domain.ConverseRequest) (*
 			Content: content,
 		})
 	}
+	cacheAfter := make(map[int]struct{}, len(req.SystemCacheAfter))
+	for _, i := range req.SystemCacheAfter {
+		cacheAfter[i] = struct{}{}
+	}
 	system := make([]brtypes.SystemContentBlock, 0, len(req.System))
-	for _, prompt := range req.System {
+	for i, prompt := range req.System {
 		system = append(system, &brtypes.SystemContentBlockMemberText{Value: prompt})
+		if _, ok := cacheAfter[i]; ok {
+			system = append(system, &brtypes.SystemContentBlockMemberCachePoint{
+				Value: brtypes.CachePointBlock{Type: brtypes.CachePointTypeDefault},
+			})
+		}
 	}
 	input := &bedrockruntime.ConverseInput{
 		ModelId:  &req.ModelID,
@@ -145,6 +154,12 @@ func (c *Client) converseAWS(ctx context.Context, req domain.ConverseRequest) (*
 		resp.Usage.Input = int(*out.Usage.InputTokens)
 		resp.Usage.Output = int(*out.Usage.OutputTokens)
 		resp.Usage.Total = int(*out.Usage.TotalTokens)
+		if out.Usage.CacheReadInputTokens != nil {
+			resp.Usage.CacheRead = int(*out.Usage.CacheReadInputTokens)
+		}
+		if out.Usage.CacheWriteInputTokens != nil {
+			resp.Usage.CacheWrite = int(*out.Usage.CacheWriteInputTokens)
+		}
 	}
 	if out.Metrics != nil && out.Metrics.LatencyMs != nil {
 		resp.LatencyMS = int64(*out.Metrics.LatencyMs)
@@ -215,9 +230,11 @@ func (c *Client) converseBearer(ctx context.Context, req domain.ConverseRequest)
 		} `json:"output"`
 		StopReason string `json:"stopReason"`
 		Usage      struct {
-			InputTokens  int `json:"inputTokens"`
-			OutputTokens int `json:"outputTokens"`
-			TotalTokens  int `json:"totalTokens"`
+			InputTokens           int `json:"inputTokens"`
+			OutputTokens          int `json:"outputTokens"`
+			TotalTokens           int `json:"totalTokens"`
+			CacheReadInputTokens  int `json:"cacheReadInputTokens"`
+			CacheWriteInputTokens int `json:"cacheWriteInputTokens"`
 		} `json:"usage"`
 		Metrics struct {
 			LatencyMS int64 `json:"latencyMs"`
@@ -244,9 +261,11 @@ func (c *Client) converseBearer(ctx context.Context, req domain.ConverseRequest)
 		},
 		StopReason: parsed.StopReason,
 		Usage: domain.TokenUsage{
-			Input:  parsed.Usage.InputTokens,
-			Output: parsed.Usage.OutputTokens,
-			Total:  parsed.Usage.TotalTokens,
+			Input:      parsed.Usage.InputTokens,
+			Output:     parsed.Usage.OutputTokens,
+			Total:      parsed.Usage.TotalTokens,
+			CacheRead:  parsed.Usage.CacheReadInputTokens,
+			CacheWrite: parsed.Usage.CacheWriteInputTokens,
 		},
 		LatencyMS:   latency,
 		RequestID:   httpResp.Header.Get("x-amzn-requestid"),
@@ -271,6 +290,11 @@ func sdkContentBlocks(message domain.BedrockChatMessage) ([]brtypes.ContentBlock
 			return nil, err
 		}
 		items = append(items, item)
+		if block.CacheHint {
+			items = append(items, &brtypes.ContentBlockMemberCachePoint{
+				Value: brtypes.CachePointBlock{Type: brtypes.CachePointTypeDefault},
+			})
+		}
 	}
 	return items, nil
 }
@@ -335,6 +359,11 @@ func sdkToolConfig(tools []domain.ToolDefinition, choice *domain.ToolChoice) (*b
 			Description: ptrString(tool.Description),
 			InputSchema: &brtypes.ToolInputSchemaMemberJson{Value: schemaValue},
 		}})
+		if tool.CacheHint {
+			items = append(items, &brtypes.ToolMemberCachePoint{
+				Value: brtypes.CachePointBlock{Type: brtypes.CachePointTypeDefault},
+			})
+		}
 	}
 	cfg := &brtypes.ToolConfiguration{Tools: items}
 	if choice != nil {
@@ -521,6 +550,11 @@ func transformJSONMessages(messages []domain.BedrockChatMessage) []map[string]an
 					}
 					content = append(content, map[string]any{"toolResult": toolResult})
 				}
+				if block.CacheHint {
+					content = append(content, map[string]any{
+						"cachePoint": map[string]any{"type": "default"},
+					})
+				}
 			}
 		}
 		items = append(items, map[string]any{
@@ -549,6 +583,11 @@ func jsonToolConfig(tools []domain.ToolDefinition, choice *domain.ToolChoice) (m
 			spec["strict"] = *tool.Strict
 		}
 		items = append(items, map[string]any{"toolSpec": spec})
+		if tool.CacheHint {
+			items = append(items, map[string]any{
+				"cachePoint": map[string]any{"type": "default"},
+			})
+		}
 	}
 	cfg := map[string]any{"tools": items}
 	if choice != nil {
@@ -569,9 +608,18 @@ func buildConversePayload(req domain.ConverseRequest) (map[string]any, error) {
 		"messages": transformJSONMessages(req.Messages),
 	}
 	if len(req.System) > 0 {
-		system := make([]map[string]string, 0, len(req.System))
-		for _, prompt := range req.System {
-			system = append(system, map[string]string{"text": prompt})
+		cacheAfter := make(map[int]struct{}, len(req.SystemCacheAfter))
+		for _, i := range req.SystemCacheAfter {
+			cacheAfter[i] = struct{}{}
+		}
+		system := make([]map[string]any, 0, len(req.System))
+		for i, prompt := range req.System {
+			system = append(system, map[string]any{"text": prompt})
+			if _, ok := cacheAfter[i]; ok {
+				system = append(system, map[string]any{
+					"cachePoint": map[string]any{"type": "default"},
+				})
+			}
 		}
 		payload["system"] = system
 	}

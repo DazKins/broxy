@@ -31,7 +31,7 @@ func TestEnsureEntryAddsZeroValuedRouteEntry(t *testing.T) {
 	if entry.ModelID != "model-a" || entry.Region != "us-east-1" {
 		t.Fatalf("entry = %#v", entry)
 	}
-	if entry.InputPerMTokens != 0 || entry.OutputPerMTokens != 0 {
+	if entry.InputPerMTokens != 0 || entry.OutputPerMTokens != 0 || entry.CacheReadPerMTokens != 0 || entry.CacheWritePerMTokens != 0 {
 		t.Fatalf("entry should start with zero pricing: %#v", entry)
 	}
 	if entry.Version != RouteDefaultVersion {
@@ -50,11 +50,13 @@ func TestEnsureEntryAddsZeroValuedRouteEntry(t *testing.T) {
 func TestEnsureEntryPreservesExistingPricing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pricing.json")
 	rows := []domain.PricingEntry{{
-		ModelID:          "model-a",
-		Region:           "us-east-1",
-		InputPerMTokens:  1.25,
-		OutputPerMTokens: 6.25,
-		Version:          "manual",
+		ModelID:              "model-a",
+		Region:               "us-east-1",
+		InputPerMTokens:      1.25,
+		OutputPerMTokens:     6.25,
+		CacheReadPerMTokens:  0.125,
+		CacheWritePerMTokens: 1.5625,
+		Version:              "manual",
 	}}
 	if err := SaveToFile(path, rows); err != nil {
 		t.Fatalf("SaveToFile() error = %v", err)
@@ -63,7 +65,7 @@ func TestEnsureEntryPreservesExistingPricing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureEntry() error = %v", err)
 	}
-	if entry.InputPerMTokens != 1.25 || entry.OutputPerMTokens != 6.25 || entry.Version != "manual" {
+	if entry.InputPerMTokens != 1.25 || entry.OutputPerMTokens != 6.25 || entry.CacheReadPerMTokens != 0.125 || entry.CacheWritePerMTokens != 1.5625 || entry.Version != "manual" {
 		t.Fatalf("existing entry was not preserved: %#v", entry)
 	}
 }
@@ -101,6 +103,34 @@ func TestEstimateCost(t *testing.T) {
 	usage := domain.TokenUsage{Input: 1000, Output: 2000}
 	got := EstimateCost(entry, usage)
 	want := 0.033
+	if got != want {
+		t.Fatalf("EstimateCost() = %f, want %f", got, want)
+	}
+}
+
+func TestEstimateCostWithCacheRates(t *testing.T) {
+	entry := &domain.PricingEntry{
+		InputPerMTokens:      3.0,
+		OutputPerMTokens:     15.0,
+		CacheReadPerMTokens:  1.0,
+		CacheWritePerMTokens: 6.0,
+	}
+	usage := domain.TokenUsage{Input: 1_000_000, Output: 1_000_000, CacheRead: 200_000, CacheWrite: 100_000}
+	got := EstimateCost(entry, usage)
+	want := 17.9
+	if got != want {
+		t.Fatalf("EstimateCost() = %f, want %f", got, want)
+	}
+}
+
+func TestEstimateCostFallsBackToInputRateForMissingCacheRates(t *testing.T) {
+	entry := &domain.PricingEntry{
+		InputPerMTokens:  3.0,
+		OutputPerMTokens: 15.0,
+	}
+	usage := domain.TokenUsage{Input: 1_000_000, Output: 1_000_000, CacheRead: 200_000, CacheWrite: 100_000}
+	got := EstimateCost(entry, usage)
+	want := 18.0
 	if got != want {
 		t.Fatalf("EstimateCost() = %f, want %f", got, want)
 	}

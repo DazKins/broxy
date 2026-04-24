@@ -375,8 +375,8 @@ Make sure each configured model is available as a Broxy model alias:
 
 ```bash
 broxy models add \
-  --alias claude-opus-4.6 \
-  --model-id global.anthropic.claude-opus-4-6-v1 \
+  --alias claude-opus-4.7 \
+  --model-id global.anthropic.claude-opus-4-7 \
   --region us-east-1
 
 broxy models add \
@@ -511,7 +511,7 @@ Set bearer mode directly in the same config file:
 
 ## Pricing and costs
 
-The generated pricing catalog starts empty. Adding a model route creates a zero-valued pricing entry for that Bedrock model and region; removing the final route for that pair removes the pricing entry. Edit the pricing file shown by `broxy config path`, then restart the service. Estimated costs are derived from token usage and that local pricing table.
+The generated pricing catalog starts empty. Adding a model route creates a zero-valued pricing entry for that Bedrock model and region; removing the final route for that pair removes the pricing entry. Edit the pricing file shown by `broxy config path`, then restart the service. Estimated costs are derived from token usage and that local pricing table. Pricing entries support `input_per_m_tokens`, `output_per_m_tokens`, `cache_read_per_m_tokens`, and `cache_write_per_m_tokens`; missing zero cache rates fall back to the normal input rate.
 
 ## Development
 
