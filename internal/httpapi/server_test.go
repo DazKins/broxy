@@ -51,6 +51,18 @@ func (fakeProvider) Converse(ctx context.Context, req domain.ConverseRequest) (*
 	}, nil
 }
 
+type cacheUsageProvider struct{}
+
+func (cacheUsageProvider) Converse(ctx context.Context, req domain.ConverseRequest) (*domain.ConverseResponse, error) {
+	resp, err := fakeProvider{}.Converse(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	resp.Usage.CacheRead = 9
+	resp.Usage.CacheWrite = 3
+	return resp, nil
+}
+
 type recordingProvider struct {
 	mu       sync.Mutex
 	requests []domain.ConverseRequest
@@ -384,6 +396,63 @@ func TestChatCompletionProxy(t *testing.T) {
 	}
 }
 
+func TestChatCompletionUsageIncludesCachedTokens(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	server := New(cfg, store, cacheUsageProvider{}, "test")
+	body := map[string]any{
+		"model":                  "claude-haiku-4-5",
+		"prompt_cache_key":       "shared-prefix",
+		"prompt_cache_retention": "24h",
+		"messages": []map[string]any{
+			{"role": "user", "content": "hello"},
+		},
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp ChatCompletionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if resp.Usage.PromptTokensDetails.CachedTokens != 9 {
+		t.Fatalf("cached tokens = %d, want 9", resp.Usage.PromptTokensDetails.CachedTokens)
+	}
+}
+
 func TestResponsesProxy(t *testing.T) {
 	tempDir := t.TempDir()
 	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
@@ -469,6 +538,78 @@ func TestResponsesProxy(t *testing.T) {
 	}
 	if resp.Usage.TotalTokens != 20 {
 		t.Fatalf("total tokens = %d", resp.Usage.TotalTokens)
+	}
+}
+
+func TestResponsesUsageIncludesCachedTokens(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tempDir, "proxy.db"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		ListenAddr:    "127.0.0.1:0",
+		DBPath:        filepath.Join(tempDir, "proxy.db"),
+		PricingPath:   filepath.Join(tempDir, "pricing.json"),
+		SessionSecret: "0123456789abcdef0123456789abcdef",
+		Upstream: config.UpstreamConfig{
+			Region: "us-east-1",
+		},
+	}
+
+	if _, err := store.CreateAPIKey(context.Background(), "tests", "bpx_test", security.HashAPIKey("bpx_test_secret"), true, nil); err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	if _, err := store.UpsertModelRoute(context.Background(), domain.ModelRoute{
+		Alias:          "claude-haiku-4-5",
+		BedrockModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Region:         "us-east-1",
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("UpsertModelRoute() error = %v", err)
+	}
+
+	server := New(cfg, store, cacheUsageProvider{}, "test")
+	body := map[string]any{
+		"model":                  "claude-haiku-4-5",
+		"input":                  "hello",
+		"prompt_cache_key":       "shared-prefix",
+		"prompt_cache_retention": "24h",
+	}
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer bpx_test_secret")
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		PromptCacheKey       string `json:"prompt_cache_key"`
+		PromptCacheRetention string `json:"prompt_cache_retention"`
+		Usage                struct {
+			InputTokensDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
+			OutputTokensDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"output_tokens_details"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if resp.Usage.InputTokensDetails.CachedTokens != 9 {
+		t.Fatalf("cached tokens = %d, want 9", resp.Usage.InputTokensDetails.CachedTokens)
+	}
+	if resp.Usage.OutputTokensDetails.ReasoningTokens != 0 {
+		t.Fatalf("reasoning tokens = %d, want 0", resp.Usage.OutputTokensDetails.ReasoningTokens)
+	}
+	if resp.PromptCacheKey != "shared-prefix" || resp.PromptCacheRetention != "24h" {
+		t.Fatalf("cache fields = %q/%q", resp.PromptCacheKey, resp.PromptCacheRetention)
 	}
 }
 

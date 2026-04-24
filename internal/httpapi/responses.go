@@ -13,19 +13,21 @@ import (
 )
 
 type ResponseRequest struct {
-	Model              string          `json:"model"`
-	Input              json.RawMessage `json:"input,omitempty"`
-	Instructions       json.RawMessage `json:"instructions,omitempty"`
-	Tools              json.RawMessage `json:"tools,omitempty"`
-	ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
-	ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
-	Temperature        *float64        `json:"temperature,omitempty"`
-	MaxOutputTokens    *int            `json:"max_output_tokens,omitempty"`
-	Stream             bool            `json:"stream,omitempty"`
-	Store              *bool           `json:"store,omitempty"`
-	User               string          `json:"user,omitempty"`
-	Metadata           json.RawMessage `json:"metadata,omitempty"`
-	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	Model                string          `json:"model"`
+	Input                json.RawMessage `json:"input,omitempty"`
+	Instructions         json.RawMessage `json:"instructions,omitempty"`
+	Tools                json.RawMessage `json:"tools,omitempty"`
+	ToolChoice           json.RawMessage `json:"tool_choice,omitempty"`
+	ParallelToolCalls    *bool           `json:"parallel_tool_calls,omitempty"`
+	Temperature          *float64        `json:"temperature,omitempty"`
+	MaxOutputTokens      *int            `json:"max_output_tokens,omitempty"`
+	Stream               bool            `json:"stream,omitempty"`
+	Store                *bool           `json:"store,omitempty"`
+	User                 string          `json:"user,omitempty"`
+	PromptCacheKey       string          `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string          `json:"prompt_cache_retention,omitempty"`
+	Metadata             json.RawMessage `json:"metadata,omitempty"`
+	PreviousResponseID   string          `json:"previous_response_id,omitempty"`
 }
 
 type storedResponse struct {
@@ -514,9 +516,15 @@ func buildResponseEnvelope(id string, req ResponseRequest, normalized *normalize
 		"tool_choice":         normalized.ToolChoiceValue,
 		"truncation":          "disabled",
 		"usage": map[string]any{
-			"input_tokens":  upstreamResp.Usage.Input,
+			"input_tokens": upstreamResp.Usage.Input,
+			"input_tokens_details": map[string]any{
+				"cached_tokens": upstreamResp.Usage.CacheRead,
+			},
 			"output_tokens": upstreamResp.Usage.Output,
-			"total_tokens":  upstreamResp.Usage.Total,
+			"output_tokens_details": map[string]any{
+				"reasoning_tokens": 0,
+			},
+			"total_tokens": upstreamResp.Usage.Total,
 		},
 		"text": map[string]any{
 			"format": map[string]any{
@@ -561,6 +569,14 @@ func buildResponseEnvelope(id string, req ResponseRequest, normalized *normalize
 	}
 	if req.User != "" {
 		response["user"] = req.User
+	} else {
+		response["user"] = nil
+	}
+	if req.PromptCacheKey != "" {
+		response["prompt_cache_key"] = req.PromptCacheKey
+	}
+	if req.PromptCacheRetention != "" {
+		response["prompt_cache_retention"] = req.PromptCacheRetention
 	}
 	response["output_text"] = upstreamResp.Text
 	return response

@@ -250,6 +250,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			PromptTokens:     upstreamResp.Usage.Input,
 			CompletionTokens: upstreamResp.Usage.Output,
 			TotalTokens:      upstreamResp.Usage.Total,
+			PromptTokensDetails: ChatPromptTokenDetails{
+				CachedTokens: upstreamResp.Usage.CacheRead,
+			},
 		},
 	}
 	writeJSON(w, http.StatusOK, resp)

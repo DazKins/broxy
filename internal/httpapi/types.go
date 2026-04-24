@@ -9,13 +9,15 @@ import (
 )
 
 type ChatCompletionRequest struct {
-	Model       string          `json:"model"`
-	Messages    []ChatMessage   `json:"messages"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	MaxTokens   *int            `json:"max_tokens,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	User        string          `json:"user,omitempty"`
-	Metadata    json.RawMessage `json:"metadata,omitempty"`
+	Model                string          `json:"model"`
+	Messages             []ChatMessage   `json:"messages"`
+	Temperature          *float64        `json:"temperature,omitempty"`
+	MaxTokens            *int            `json:"max_tokens,omitempty"`
+	Stream               bool            `json:"stream,omitempty"`
+	User                 string          `json:"user,omitempty"`
+	PromptCacheKey       string          `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string          `json:"prompt_cache_retention,omitempty"`
+	Metadata             json.RawMessage `json:"metadata,omitempty"`
 }
 
 type ChatMessage struct {
@@ -44,9 +46,21 @@ type ChoiceMessage struct {
 }
 
 type ChatCompletionUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                    `json:"prompt_tokens"`
+	CompletionTokens        int                    `json:"completion_tokens"`
+	TotalTokens             int                    `json:"total_tokens"`
+	PromptTokensDetails     ChatPromptTokenDetails `json:"prompt_tokens_details"`
+	CompletionTokensDetails ChatCompletionDetails  `json:"completion_tokens_details"`
+}
+
+type ChatPromptTokenDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+type ChatCompletionDetails struct {
+	ReasoningTokens          int `json:"reasoning_tokens"`
+	AcceptedPredictionTokens int `json:"accepted_prediction_tokens"`
+	RejectedPredictionTokens int `json:"rejected_prediction_tokens"`
 }
 
 func normalizeMessages(messages []ChatMessage) ([]domain.BedrockChatMessage, []string, error) {
